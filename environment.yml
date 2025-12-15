@@ -1,0 +1,25 @@
+name: semeval
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - tqdm
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pip:
+      - transformers>=4.40.0
+      - datasets>=2.18.0
+      - evaluate
+      - sentencepiece
+      - accelerate
+      - huggingface_hub
+      - tokenizers

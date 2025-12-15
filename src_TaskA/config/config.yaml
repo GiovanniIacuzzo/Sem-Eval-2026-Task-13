@@ -1,0 +1,53 @@
+# ---------------------
+# Dataset
+# ---------------------
+data:
+  train_path: "data/Task_A/train.parquet"
+  val_path: "data/Task_A/validation.parquet"
+  max_length: 384
+  balance_languages: True 
+
+# ---------------------
+# Model
+# ---------------------
+model:
+  model_name: "microsoft/unixcoder-base"
+  num_labels: 2
+  freeze_layers: 0
+  extra_dropout: 0.2
+  languages:
+    - python
+    - java
+    - c++
+
+# ---------------------
+# Training
+# ---------------------
+training:
+  output_dir: "./results_TaskA"
+  checkpoint_dir: "./results_TaskA/checkpoints"
+  log_dir: "./results_TaskA/logs"
+  
+  num_epochs: 1
+  early_stop_patience: 3
+  
+  batch_size: 16
+  gradient_accumulation_steps: 8
+  
+  learning_rate: 0.00002
+  evaluation_metric: "f1"
+  best_metric_lower_is_better: false
+  
+  # Warmup leggermente più lungo per stabilizzare la DANN all'inizio
+  warmup_ratio: 0.15 
+  fp16: true
+  
+  # Label smoothing aiuta a non essere troppo "sicuri" e favorisce generalizzazione
+  label_smoothing: 0.1 
+
+# ---------------------
+# Demo mode
+# ---------------------
+demo:
+  active: true
+  fraction: 0.01

@@ -1,0 +1,10 @@
+idee.txt
+.env
+Icon?
+.DS_Store
+__pycache__/
+temp.py
+train_baseline.py
+data/
+results_TaskA/
+test/
