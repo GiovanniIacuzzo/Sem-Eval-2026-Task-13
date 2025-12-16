@@ -1,53 +1,97 @@
+# ==========================================
+# SemEval 2026 Task 13 - Subtask A Config
+# Optimized for NVIDIA T4 (16GB VRAM)
+# Strategy: LoRA + DANN + Metric Learning
+# ==========================================
+
 # ---------------------
-# Dataset
+# Dataset Configuration
 # ---------------------
 data:
   train_path: "data/Task_A/train.parquet"
+  # Se validation.parquet non esiste, dataset.py lo gestirà (se hai implementato lo split)
+  # oppure userà un file scaricato da Kaggle
   val_path: "data/Task_A/validation.parquet"
-  max_length: 384
-  balance_languages: True 
+  
+  # CRUCIALE: 512 tokens.
+  # Il codice "Machine Generated" spesso tradisce la sua natura 
+  # nell'header (import) o nel footer (main boilerplate).
+  # 384 è troppo corto per catturare entrambi in file lunghi.
+  max_length: 512
+  
+  # Bilanciamento
+  balance_languages: True
+  # Taglia il linguaggio dominante (es. Python) a 6000 sample
+  # per evitare che il modello impari solo "Python vs AI".
+  samples_per_lang: 6000 
 
 # ---------------------
-# Model
+# Model Architecture
 # ---------------------
 model:
+  # UniXCoder è SOTA per Code Understanding, meglio di CodeBERT nel 2024/25
   model_name: "microsoft/unixcoder-base"
-  num_labels: 2
-  freeze_layers: 0
-  extra_dropout: 0.2
+  
+  num_labels: 2 # Binary: 0=Human, 1=AI
+  
+  # --- LoRA Optimization ---
+  # Abilita il training su T4 con batch size decenti
+  use_lora: true 
+  
+  extra_dropout: 0.1 # Ridotto leggermente perché usiamo SupCon
+  
+  # --- DANN Targets ---
+  # Più linguaggi mettiamo, più difficile rendiamo la vita all'encoder
+  # costringendolo a imparare feature "agnostiche" al linguaggio.
   languages:
     - python
     - java
     - c++
+    - c
+    - c#
+    - javascript
+    - go
+    - php
+    - ruby
 
 # ---------------------
-# Training
+# Training Hyperparameters
 # ---------------------
 training:
   output_dir: "./results_TaskA"
   checkpoint_dir: "./results_TaskA/checkpoints"
   log_dir: "./results_TaskA/logs"
   
-  num_epochs: 1
-  early_stop_patience: 3
+  # LoRA converge lentamente. 1 epoca è insufficiente.
+  num_epochs: 12
+  early_stop_patience: 4
   
+  # --- Memory Strategy T4 ---
+  # Batch 16 è sicuro sulla T4 con 512 tokens.
+  # Accumulation 4 -> Effective Batch Size = 64.
+  # Metric Learning (SupCon) adora batch size grandi effettivi.
   batch_size: 16
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4
   
-  learning_rate: 0.00002
+  # --- Learning Rate ---
+  # CRITICO: Con LoRA devi usare 2e-4 o 3e-4.
+  # Se usi 2e-5 (standard), il modello non apprende.
+  learning_rate: 0.0003
+  
   evaluation_metric: "f1"
+  # F1 più alto è meglio
   best_metric_lower_is_better: false
   
-  # Warmup leggermente più lungo per stabilizzare la DANN all'inizio
-  warmup_ratio: 0.15 
+  warmup_ratio: 0.1
   fp16: true
   
-  # Label smoothing aiuta a non essere troppo "sicuri" e favorisce generalizzazione
-  label_smoothing: 0.1 
+  # Label smoothing 0.05 + SupCon Loss è una combo potente
+  label_smoothing: 0.05
 
 # ---------------------
-# Demo mode
+# Demo Mode
 # ---------------------
 demo:
-  active: true
-  fraction: 0.01
+  # IMPORTANTE: Imposta a 'false' per lanciare il training vero!
+  active: false 
+  fraction: 0.05 # Se attivo, usa il 5% dei dati per test rapido

@@ -5,15 +5,24 @@ from transformers import AutoTokenizer, AutoModel
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
+# Imports per Metric Learning e LoRA
+try:
+    from pytorch_metric_learning import losses
+    METRIC_LEARNING_AVAILABLE = True
+except ImportError:
+    METRIC_LEARNING_AVAILABLE = False
+    print("WARNING: pytorch-metric-learning not found. Install with 'pip install pytorch-metric-learning'")
+
+try:
+    from peft import get_peft_model, LoraConfig, TaskType
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+
 # -----------------------------------------------------------------------------
-# Gradient Reversal Function
+# 1. Gradient Reversal Layer (DANN)
 # -----------------------------------------------------------------------------
 class GradientReversalFn(torch.autograd.Function):
-    """
-    Gradient Reversal Layer.
-    Forward: Identity function (passa i dati senza modificarli).
-    Backward: Inverte il gradiente moltiplicandolo per -alpha.
-    """
     @staticmethod
     def forward(ctx, x, alpha):
         ctx.alpha = alpha
@@ -25,191 +34,149 @@ class GradientReversalFn(torch.autograd.Function):
         return output, None
 
 # -----------------------------------------------------------------------------
-# Main Model Class
+# 2. Attention Pooling
+# -----------------------------------------------------------------------------
+class AttentionHead(nn.Module):
+    """Pooling intelligente che impara quali token sono importanti."""
+    def __init__(self, hidden_size, dropout_prob=0.1):
+        super().__init__()
+        self.attn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, 1)
+        )
+        self.dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, hidden_states, attention_mask):
+        attn_scores = self.attn(hidden_states).squeeze(-1)
+        attn_scores = attn_scores.masked_fill(attention_mask == 0, -1e9)
+        attn_weights = self.dropout(F.softmax(attn_scores, dim=-1))
+        return torch.sum(attn_weights.unsqueeze(-1) * hidden_states, dim=1)
+
+# -----------------------------------------------------------------------------
+# 3. Main Model Class
 # -----------------------------------------------------------------------------
 class CodeClassifier(nn.Module):
-    """
-    Transformer-based model for Binary Code Classification with DANN & Multi-Sample Dropout.
-    
-    Architecture:
-    1. Backbone: Pre-trained Transformer (UniXCoder/CodeBERT)
-    2. Pooling: Mean Pooling
-    3. Head A (Task): Multi-Sample Dropout -> MLP -> Human/Machine
-    4. Head B (Adversarial): Gradient Reversal -> MLP -> Language Prediction
-    """
     def __init__(self, config):
         super().__init__()
         model_cfg = config.get("model", {})
         data_cfg  = config.get("data", {})
-        train_cfg = config.get("training", {})
-
+        
         self.model_name = model_cfg.get("model_name", "microsoft/codebert-base")
-        self.num_labels = model_cfg.get("num_labels", 2)
+        self.num_labels = 2
+        self.target_languages = model_cfg.get("languages", ["python", "java", "cpp"])
+        self.num_languages = len(self.target_languages)
+        self.max_length = data_cfg.get("max_length", 512)
         
-        # Recupera il numero di linguaggi per la testa avversaria
-        self.languages = model_cfg.get("languages", ["python", "java", "c++"])
-        self.num_languages = len(self.languages)
-        
-        self.max_length = data_cfg.get("max_length", 256)
-        self.device = torch.device(config.get("training_device", "cpu"))
-
-        # Hyperparameters
-        self.label_smoothing = train_cfg.get("label_smoothing", 0.0)
-        self.freeze_layers   = model_cfg.get("freeze_layers", 0)
-        self.extra_dropout   = model_cfg.get("extra_dropout", 0.1)
-
-        # ---------------------------------------------------------------------
-        # Backbone Initialization
-        # ---------------------------------------------------------------------
+        # --- Backbone & LoRA ---
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.base_model = AutoModel.from_pretrained(self.model_name)
+        base_model = AutoModel.from_pretrained(self.model_name)
+        self.hidden_size = base_model.config.hidden_size
 
-        # Gradient Checkpointing (Memory optimization)
-        # self.base_model.gradient_checkpointing_enable()
-        self.hidden_size = self.base_model.config.hidden_size
-
-        # Inject dropout into transformer
-        if hasattr(self.base_model.config, "hidden_dropout_prob"):
-            self.base_model.config.hidden_dropout_prob = self.extra_dropout
-        if hasattr(self.base_model.config, "attention_probs_dropout_prob"):
-            self.base_model.config.attention_probs_dropout_prob = self.extra_dropout
-
-        # Layer Freezing
-        if hasattr(self.base_model, "roberta") and self.freeze_layers > 0:
-            for layer in self.base_model.roberta.encoder.layer[:self.freeze_layers]:
-                for param in layer.parameters():
-                    param.requires_grad = False
-
-        # ---------------------------------------------------------------------
-        # Head 1: Main Task Classifier (Human vs Machine)
-        # ---------------------------------------------------------------------
-        # Utilizziamo Multi-Sample Dropout (MSD).
-        # Creiamo 5 layer di dropout in parallelo.
-        self.dropouts = nn.ModuleList([
-            nn.Dropout(0.2) for _ in range(5)
-        ])
+        self.use_lora = model_cfg.get("use_lora", True) and PEFT_AVAILABLE
         
-        # La parte densa del classificatore (dopo il dropout)
+        if self.use_lora:
+            print(f"🚀 Activating LoRA for {self.model_name}...")
+            peft_config = LoraConfig(
+                task_type=TaskType.FEATURE_EXTRACTION, 
+                inference_mode=False, r=16, lora_alpha=32, lora_dropout=0.1,
+                target_modules=["query", "value", "key", "dense"]
+            )
+            self.base_model = get_peft_model(base_model, peft_config)
+        else:
+            self.base_model = base_model
+            self.base_model.gradient_checkpointing_enable()
+
+        # --- Components ---
+        self.pooler = AttentionHead(self.hidden_size)
+        
+        # 1. Main Task Head (Classificatore)
         self.classifier = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
-            nn.Tanh(),
+            nn.Mish(),
+            nn.Dropout(0.1),
             nn.Linear(self.hidden_size, self.num_labels)
         )
         
-        # ---------------------------------------------------------------------
-        # Head 2: Language Discriminator (Adversarial / DANN)
-        # ---------------------------------------------------------------------
-        # Questa testa cerca di indovinare il linguaggio. 
-        # Noi cercheremo di ingannarla invertendo il gradiente.
-        self.language_classifier = nn.Sequential(
+        # 2. Projection Head (Critica per Metric Learning)
+        # La Contrastive Loss lavora meglio su uno spazio proiettato (es. 128 dim)
+        self.projection_head = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.ReLU(),
-            nn.Linear(self.hidden_size, self.num_languages)
+            nn.Linear(self.hidden_size, 128) 
+        )
+        
+        # 3. Adversarial Head (DANN)
+        self.language_classifier = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size // 2, self.num_languages)
         )
 
-        # Init weights
         self._init_weights(self.classifier)
+        self._init_weights(self.projection_head)
         self._init_weights(self.language_classifier)
 
-        self.to(self.device)
+        # --- LOSS FUNCTIONS ---
+        self.ce_loss = nn.CrossEntropyLoss(label_smoothing=0.05)
+        self.dann_loss = nn.CrossEntropyLoss(ignore_index=-1)
+        
+        # PyTorch Metric Learning Implementation
+        # SupConLoss gestisce automaticamente i positivi (stessa label) e negativi
+        if METRIC_LEARNING_AVAILABLE:
+            self.supcon_loss = losses.SupConLoss(temperature=0.07)
+        else:
+            self.supcon_loss = None
+
+        self.contrastive_weight = 0.5 
 
     def _init_weights(self, module):
-        """Xavier Uniform initialization."""
         if isinstance(module, nn.Linear):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.constant_(module.bias, 0)
 
-    def tokenize(self, texts):
-        return self.tokenizer(
-            texts,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-            return_tensors="pt"
-        )
-
     def forward(self, input_ids, attention_mask, lang_ids=None, labels=None, alpha=1.0):
-        """
-        Forward pass con DANN e Multi-Sample Dropout.
-        
-        Args:
-            alpha (float): Scaling factor per il Gradient Reversal Layer. 
-                           Solitamente parte da 0 e arriva a 1 durante il training.
-        """
-        # 1. Backbone Pass
+        # 1. Backbone
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
-        last_hidden_state = outputs.last_hidden_state
+        # Usa il pooler AttentionHead
+        features = self.pooler(outputs.last_hidden_state, attention_mask)
 
-        # 2. Mean Pooling
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
-        sum_embeddings = torch.sum(last_hidden_state * input_mask_expanded, 1)
-        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-        mean_pooled = sum_embeddings / sum_mask # [batch_size, hidden_size]
-
-        # ---------------------------------------------------------------------
-        # 3. Main Task Prediction (Multi-Sample Dropout)
-        # ---------------------------------------------------------------------
-        # Passiamo l'embedding attraverso 5 dropout diversi e facciamo la media dei logits.
-        task_logits_list = []
-        for dropout in self.dropouts:
-            task_logits_list.append(self.classifier(dropout(mean_pooled)))
+        # 2. Main Classification
+        task_logits = self.classifier(features)
         
-        # [batch_size, num_labels]
-        task_logits = torch.mean(torch.stack(task_logits_list), dim=0)
-
-        # ---------------------------------------------------------------------
-        # 4. Adversarial Task Prediction (Language ID)
-        # ---------------------------------------------------------------------
-        # Applichiamo il Gradient Reversal Layer
-        reversed_features = GradientReversalFn.apply(mean_pooled, alpha)
-        lang_logits = self.language_classifier(reversed_features)
-
-        # ---------------------------------------------------------------------
-        # 5. Loss Calculation
-        # ---------------------------------------------------------------------
         loss = None
         if labels is not None:
-            # Main Task Loss
-            task_loss = self.compute_loss(task_logits, labels)
+            # A. Classification Loss (Cross Entropy)
+            loss_ce = self.ce_loss(task_logits, labels)
             
-            # Adversarial Loss (se abbiamo le etichette del linguaggio)
-            # Nota: durante la validazione/test potremmo non voler calcolare questa loss
-            if lang_ids is not None:
-                loss_fct = nn.CrossEntropyLoss()
-                # La loss avversaria "tira" i pesi per minimizzare l'errore sulla lingua,
-                # MA il GRL inverte il gradiente, quindi l'encoder impara a *massimizzare* l'errore (confusione).
-                lang_loss = loss_fct(lang_logits, lang_ids)
+            # B. Metric Learning Loss (SupCon)
+            loss_scl = 0.0
+            if self.supcon_loss is not None:
+                # Proiezione + Normalizzazione (Fondamentale per la loss coseno/SupCon)
+                proj_features = self.projection_head(features)
+                proj_features = F.normalize(proj_features, p=2, dim=1)
                 
-                # Loss Totale
-                loss = task_loss + lang_loss
-            else:
-                loss = task_loss
+                # Calcolo della loss usando la libreria esterna
+                loss_scl = self.supcon_loss(proj_features, labels)
+            
+            # C. DANN Loss (Adversarial)
+            loss_dann = 0.0
+            if lang_ids is not None and alpha > 0:
+                reversed_feats = GradientReversalFn.apply(features, alpha)
+                lang_logits = self.language_classifier(reversed_feats)
+                loss_dann = self.dann_loss(lang_logits, lang_ids)
+            
+            # Weighted Sum
+            loss = loss_ce + (self.contrastive_weight * loss_scl) + loss_dann
             
         return task_logits, loss
-
-    def compute_loss(self, logits, labels):
-        if self.label_smoothing > 0:
-            log_probs = F.log_softmax(logits, dim=-1)
-            nll_loss = -log_probs.gather(dim=-1, index=labels.unsqueeze(1)).squeeze(1)
-            smooth_loss = -log_probs.mean(dim=-1)
-            return ((1.0 - self.label_smoothing) * nll_loss + self.label_smoothing * smooth_loss).mean()
-        else:
-            return nn.CrossEntropyLoss()(logits, labels)
 
     def compute_metrics(self, preds, labels):
         preds = np.array(preds)
         labels = np.array(labels)
-        
-        if preds.ndim > 1: 
-            preds = np.argmax(preds, axis=1)
+        if preds.ndim > 1: preds = np.argmax(preds, axis=1)
         
         acc = accuracy_score(labels, preds)
-        p, r, f1, _ = precision_recall_fscore_support(labels, preds, average="macro")
-        
-        return {
-            "accuracy": acc, 
-            "precision": p, 
-            "recall": r, 
-            "f1": f1
-        }
+        p, r, f1, _ = precision_recall_fscore_support(labels, preds, average="binary")
+        return {"accuracy": acc, "precision": p, "recall": r, "f1": f1}
