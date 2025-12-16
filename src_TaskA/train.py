@@ -245,18 +245,18 @@ if __name__ == "__main__":
     # Qui il load_data userà i path aggiornati da Kaggle
     train_dataset, val_dataset, _, _ = load_data(config, model_wrapper.tokenizer)
 
-    num_workers = 2
+    num_workers = 4
     persistent_workers = True if num_workers > 0 else False
     
     train_dl = DataLoader(
         train_dataset, batch_size=config["training"]["batch_size"], 
         shuffle=True, num_workers=num_workers, 
-        pin_memory=False, persistent_workers=persistent_workers
+        pin_memory=True, persistent_workers=persistent_workers
     )
     val_dl = DataLoader(
         val_dataset, batch_size=config["training"]["batch_size"], 
         shuffle=False, num_workers=num_workers, 
-        pin_memory=False, persistent_workers=persistent_workers
+        pin_memory=True, persistent_workers=persistent_workers
     )
 
     # 5. Optimization

@@ -1,18 +1,28 @@
+# ==========================================
+# SemEval 2026 Task 13 - Task B Configuration
+# Optimized for NVIDIA T4 (16GB VRAM) + CUDA
+# ==========================================
+
 # ---------------------
 # Dataset Configuration
 # ---------------------
 data:
   # Percorsi
   train_path: "data/Task_B/train.parquet"
-  val_path: "data/Task_B/validation.parquet"
+  # Il validation path è opzionale: se presente, viene unito al train 
+  # e poi lo script 'dataset.py' rigenera lo split "Unseen Author"
+  val_path: "data/Task_B/validation.parquet" 
   
-  # CRUCIALE: Aumentato a 512. 
-  # Grazie a LoRA e UniXCoder, il Mac M2 può reggerlo. 
-  # 256 è troppo poco per capire lo stile di un LLM.
+  # Context Length
+  # 512 è lo sweet spot per UniXCoder.
+  # Sulla T4 con LoRA potremmo osare di più, ma 512 garantisce stabilità
+  # e copre la maggior parte delle "firme" stilistiche.
   max_length: 512 
   
+  # Data Balancing & Split
+  # True: evita che Python/Java dominino il training.
   balance_languages: True
-  samples_per_group: 3000 # Limita i gruppi troppo grandi (Python) per non biasare il modello
+  samples_per_group: 4000 
   
   task_type: "multiclass"
 
@@ -22,15 +32,16 @@ data:
 model:
   model_name: "microsoft/unixcoder-base"
   
-  # 31 classi (Human + 30 AI)
+  # 31 classi (Human + 30 AI Families)
   num_labels: 31
   
-  # --- ATTIVAZIONE LORA (M2 Secret Weapon) ---
-  # Abilita il training leggero. Consumo RAM ridotto del 70%.
+  # --- LORA CONFIGURATION ---
+  # Attivato nel codice (model.py) con r=64 e alpha=128
   use_lora: true 
   
-  freeze_layers: 0 # Con LoRA non serve freezare layer, freeza tutto lui in automatico
-  extra_dropout: 0.05 # Ridotto perché LoRA ha già il suo dropout interno
+  # Dropout specifico per il classificatore
+  # Lo teniamo basso perché usiamo già Label Smoothing e LoRA Dropout
+  extra_dropout: 0.1 
 
 # ---------------------
 # Training Hyperparameters
@@ -40,34 +51,41 @@ training:
   checkpoint_dir: "./results_TaskB/checkpoints"
   log_dir: "./results_TaskB/logs"
   
-  # LoRA converge più lentamente del Full Fine-tuning, servono più epoche.
-  num_epochs: 1
+  # --- STRATEGIA DI TRAINING ---
+  # LoRA richiede più epoche del full fine-tuning per convergere bene,
+  # specialmente con il rank alto (r=64).
+  num_epochs: 10
   early_stop_patience: 3
   
-  # --- OTTIMIZZAZIONE M2 ---
-  # Con LoRA, il modello pesa pochissimo in RAM. 
-  # Possiamo alzare il batch size fisico a 16.
-  # 16 batch * 4 accum = 64 Effective Batch Size (Molto stabile)
-  batch_size: 4
-  gradient_accumulation_steps: 16
+  # --- MEMORY TUNING (T4 16GB) ---
+  # Con fp16 e LoRA, UniXCoder occupa circa 8-10GB con batch=16.
+  # Batch size fisico: 16
+  # Accumulation: 4
+  # Batch size effettivo: 16 * 4 = 64 (Ideale per stabilità dei gradienti)
+  batch_size: 16
+  gradient_accumulation_steps: 4
   
-  # IMPORTANTE: Con LoRA il Learning Rate deve essere ALTO (1e-4 o 2e-4).
-  # Se usi 2e-5 (standard BERT), LoRA non impara nulla.
-  learning_rate: 0.0002 
+  # --- LEARNING RATE ---
+  # Per LoRA serve un LR più aggressivo rispetto al full fine-tuning (solitamente 2e-5).
+  # 3e-4 è ottimo per AdamW + OneCycleLR scheduler.
+  learning_rate: 0.0003
   
+  # Mixed Precision (CRITICO per T4)
+  # Velocizza il training di 2x-3x e riduce la VRAM.
+  fp16: true 
+  
+  # Metrica per il salvataggio del modello migliore
   evaluation_metric: "f1"
-  best_metric_lower_is_better: false
   
-  warmup_ratio: 0.1
-  fp16: true # Fondamentale per MPS (Metal Performance Shaders)
-  
-  # Nota: La Focal Loss è gestita internamente dal modello, 
-  # questo parametro label_smoothing serve solo se disabilitiamo Focal Loss in futuro.
-  label_smoothing: 0.0 
+  # Label Smoothing è gestito nella Loss Custom, 
+  # ma lo lasciamo qui per riferimento futuro.
+  label_smoothing: 0.1 
 
 # ---------------------
-# Debugging
+# Debugging / Demo
 # ---------------------
 demo:
-  active: true # Metti 'false' per iniziare il training vero!
-  fraction: 0.01
+  # IMPOSTA A 'false' PER IL TRAINING COMPLETO
+  # Se 'true', usa solo 2000 righe per testare che il codice non crashi.
+  active: false 
+  fraction: 0.05

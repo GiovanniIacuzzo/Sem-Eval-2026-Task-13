@@ -3,8 +3,9 @@ import random
 import logging
 import pandas as pd
 import torch
+import numpy as np
 import seaborn as sns
-import seaborn as plt
+import matplotlib.pyplot as plt
 from typing import Tuple, List, Dict, Optional
 from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
@@ -25,45 +26,45 @@ if not logger.handlers:
 # -----------------------------------------------------------------------------
 class CodeDataset(Dataset):
     """
-    Custom PyTorch Dataset for Source Code Classification.
-    
-    Updated for DANN (Domain Adversarial Training):
-    - Returns 'lang_ids' alongside input_ids and labels.
-    - Maps language strings to integers based on a provided mapping.
+    Optimized PyTorch Dataset for T4 GPU.
+    Handles tokenization on-the-fly to save RAM.
     """
     def __init__(self, 
                  dataframe: pd.DataFrame, 
                  tokenizer, 
                  language_map: Dict[str, int],
-                 max_length: int = 256, 
+                 max_length: int = 512, # Aumentato per T4 (regge fino a 512 comodo)
                  augment: bool = False):
         
+        # Reset index is crucial for fast __getitem__ access
         self.data = dataframe.reset_index(drop=True)
         self.tokenizer = tokenizer
-        self.language_map = language_map  # {'python': 0, 'java': 1, ...}
+        self.language_map = language_map
         self.max_length = max_length
         self.augment = augment
-        
-        # Cache mask token ID for performance during augmentation
         self.mask_token_id = tokenizer.mask_token_id
 
     def __len__(self) -> int:
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        code = str(self.data.loc[idx, "code"])
-        label = int(self.data.loc[idx, "label"])
-        lang_str = str(self.data.loc[idx, "language"]).lower()
+        # Fast access using .at avoids overhead of .loc
+        code = str(self.data.at[idx, "code"])
+        label = int(self.data.at[idx, "label"])
+        lang_str = str(self.data.at[idx, "language"]).lower()
         
-        # DANN Target: Map string to ID. Return -1 if language is unknown (unseen during training)
+        # DANN Target: Map string to ID. Return -1 if language is unknown
         lang_id = self.language_map.get(lang_str, -1)
         
         # ---------------------------------------------------------
         # 1. Random Cropping Strategy (Generalization)
         # ---------------------------------------------------------
+        # Se il codice è molto lungo, prendiamo un pezzo casuale invece che solo l'inizio.
+        # Questo aiuta il modello a vedere parti diverse del codice (import vs logica).
         if self.augment and len(code) > self.max_length * 4:
             start_idx = random.randint(0, len(code) - self.max_length * 4)
-            code = code[start_idx:] 
+            # Prendiamo una finestra leggermente più grande del max_length caratteri
+            code = code[start_idx : start_idx + self.max_length * 6]
 
         # ---------------------------------------------------------
         # 2. Tokenization
@@ -82,13 +83,18 @@ class CodeDataset(Dataset):
         # ---------------------------------------------------------
         # 3. Smart Augmentation (Token-Level Masking)
         # ---------------------------------------------------------
+        # Eseguito solo su Tensor GPU/CPU veloce, non su stringhe
         if self.augment:
+            # 15% probability of masking a token
             probability_matrix = torch.full(input_ids.shape, 0.15)
             
+            # Don't mask special tokens ([CLS], [SEP], [PAD])
             special_tokens_mask = self.tokenizer.get_special_tokens_mask(
                 input_ids.tolist(), already_has_special_tokens=True
             )
             probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
+            
+            # Don't mask padding
             probability_matrix.masked_fill_(attention_mask == 0, value=0.0)
             
             masked_indices = torch.bernoulli(probability_matrix).bool()
@@ -98,105 +104,113 @@ class CodeDataset(Dataset):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": torch.tensor(label, dtype=torch.long),
-            "lang_ids": torch.tensor(lang_id, dtype=torch.long) # New for DANN
+            "lang_ids": torch.tensor(lang_id, dtype=torch.long)
         }
 
 # -----------------------------------------------------------------------------
 # Data Preprocessing Logic
 # -----------------------------------------------------------------------------
-def load_and_preprocess(file_path: str, max_code_len: int = 4096) -> pd.DataFrame:
-    """Loads Parquet file and applies initial cleaning."""
-    columns = ['code', 'label', 'language', 'generator']
+def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataFrame:
+    """Caricamento veloce con filtri base."""
+    columns = ['code', 'label', 'language']
     try:
         df = pd.read_parquet(file_path, columns=columns)
     except Exception as e:
         logger.error(f"Failed to load data from {file_path}: {e}")
         raise e
     
+    # Pulizia rapida
     df['language'] = df['language'].str.lower()
-    df = df.dropna(subset=['code'])
-    df = df[df['code'].str.len() > 10].copy()
-    df['code'] = df['code'].str.slice(0, max_code_len)
+    df = df.dropna(subset=['code']).reset_index(drop=True)
+    
+    # Filtra snippet troppo corti (rumore) o vuoti
+    df = df[df['code'].str.len() > 20].copy()
+    
+    # Troncamento caratteri per risparmiare RAM prima della tokenizzazione
+    df['code'] = df['code'].str.slice(0, max_code_chars)
     
     return df
 
-def stratified_sample(df: pd.DataFrame, fraction: float = 0.3, stratify_cols: List[str] = ["language", "label"], random_state: int = 42) -> pd.DataFrame:
-    stratify_key = df[stratify_cols].astype(str).agg("__".join, axis=1)
-    sampled_df, _ = train_test_split(
-        df, train_size=fraction, stratify=stratify_key, random_state=random_state
-    )
-    return sampled_df
-
-def balance_languages(df: pd.DataFrame, fraction: float = 0.3, max_samples_per_lang: int = 5000, random_state: int = 42) -> pd.DataFrame:
-    df_list = []
-    for _, group in df.groupby('language'):
-        n_samples = int(len(group) * fraction)
-        n_samples = min(n_samples, max_samples_per_lang)
-        if n_samples > 0:
-            df_list.append(group.sample(n=n_samples, random_state=random_state))
-            
-    if not df_list:
-        return df
-        
-    return pd.concat(df_list).sample(frac=1, random_state=random_state).reset_index(drop=True)
-
-# -----------------------------------------------------------------------------
-# Exploratory Data Analysis (EDA)
-# -----------------------------------------------------------------------------
-def eda_dataframe(df: pd.DataFrame, name: str, img_path: str):
-    os.makedirs(img_path, exist_ok=True)
-    lengths = df['code'].str.len()
+def balance_languages(df: pd.DataFrame, target_samples: int = 3000) -> pd.DataFrame:
+    """
+    DOWNSAMPLING INTELLIGENTE:
+    1. Identifica i linguaggi.
+    2. Se un linguaggio ha > target_samples (es. Python con 20k righe), lo taglia a target_samples.
+    3. Se ne ha meno, li tiene tutti (o fa upsampling se volessimo, ma meglio evitare duplicati qui).
+    """
+    logger.info(f"Balancing languages... Target cap per language: {target_samples}")
     
-    plt.figure(figsize=(10,4))
-    sns.histplot(x=lengths, hue=df['label'], bins=50, log_scale=True)
-    plt.savefig(os.path.join(img_path, f"{name}_length.png"))
-    plt.close()
+    df_list = []
+    # Conta le occorrenze
+    lang_counts = df['language'].value_counts()
+    logger.info(f"Original distribution:\n{lang_counts.head()}")
 
-    plt.figure(figsize=(10,4))
-    sns.countplot(data=df, x='language', hue='label')
-    plt.savefig(os.path.join(img_path, f"{name}_lang.png"))
-    plt.close()
+    for lang, count in lang_counts.items():
+        lang_group = df[df['language'] == lang]
+        
+        if count > target_samples:
+            # Downsampling: prendi un campione casuale
+            df_list.append(lang_group.sample(n=target_samples, random_state=42))
+        else:
+            # Keep all
+            df_list.append(lang_group)
+            
+    balanced_df = pd.concat(df_list).sample(frac=1, random_state=42).reset_index(drop=True)
+    
+    logger.info(f"Balanced distribution:\n{balanced_df['language'].value_counts().head()}")
+    return balanced_df
 
 # -----------------------------------------------------------------------------
 # Main Data Loading Interface
 # -----------------------------------------------------------------------------
 def load_data(config: dict, tokenizer) -> Tuple[CodeDataset, CodeDataset, pd.DataFrame, pd.DataFrame]:
     """
-    Orchestrates data loading, preprocessing, balancing, and dataset creation.
+    Pipeline completa di caricamento dati.
     """
-    logger.info("Starting Data Pipeline...")
+    logger.info(">>> Loading Data for Task A <<<")
     
-    train_df = load_and_preprocess(config["data"]["train_path"])
-    val_df   = load_and_preprocess(config["data"]["val_path"])
+    train_path = config["data"]["train_path"]
+    val_path = config["data"]["val_path"]
     
-    max_len  = config["data"].get("max_length", 256)
-
-    # 1. Generate Language Mapping for DANN
-    # We use the list from config to ensure consistent ID mapping
-    target_languages = config["model"].get("languages", ["python", "java", "c++"])
-    # Map: {'python': 0, 'java': 1, 'c++': 2}
-    language_map = {lang.lower(): i for i, lang in enumerate(target_languages)}
-    logger.info(f"DANN Language Mapping: {language_map}")
-
-    # 2. Class Balancing
+    # 1. Load DataFrames
+    train_df = load_and_preprocess(train_path)
+    val_df   = load_and_preprocess(val_path)
+    
+    # 2. Downsampling del linguaggio dominante
+    # Leggiamo il parametro dal config, default 4000 (buono per T4/CodeBERT)
+    samples_cap = config["data"].get("samples_per_lang", 4000)
+    
     if config["data"].get("balance_languages", True):
-        logger.info("Applying Language Balancing...")
-        train_df = balance_languages(train_df)
-        val_df   = balance_languages(val_df) 
+        train_df = balance_languages(train_df, target_samples=samples_cap)
+        # Non bilanciamo il validation set! Deve riflettere la distribuzione reale (o quella del test).
     
-    # 3. Demo Mode
-    demo_cfg = config.get("demo", {})
-    if demo_cfg.get("active", False):
-        fraction = demo_cfg.get("fraction", 0.3)
-        train_df = stratified_sample(train_df, fraction=fraction)
-        val_df   = stratified_sample(val_df, fraction=fraction)
-
-    logger.info(f"Final Dataset Sizes -> Train: {len(train_df)} | Val: {len(val_df)}")
+    # 3. DANN Language Mapping setup
+    # Mappiamo i linguaggi presenti nel config a interi.
+    target_langs = config["model"].get("languages", ["python", "java", "cpp", "c#", "javascript"])
+    language_map = {lang.lower(): i for i, lang in enumerate(target_langs)}
     
-    # 4. Dataset Instantiation with Language Map
-    train_dataset = CodeDataset(train_df, tokenizer, language_map, max_length=max_len, augment=True)
-    val_dataset   = CodeDataset(val_df, tokenizer, language_map, max_length=max_len, augment=False)
+    # 4. Dataset Creation
+    max_len = config["data"].get("max_length", 512)
+    
+    # Train: Augmentation ON
+    train_dataset = CodeDataset(
+        train_df, 
+        tokenizer, 
+        language_map, 
+        max_length=max_len, 
+        augment=True
+    )
+    
+    # Val: Augmentation OFF
+    val_dataset = CodeDataset(
+        val_df, 
+        tokenizer, 
+        language_map, 
+        max_length=max_len, 
+        augment=False
+    )
 
+    logger.info(f"Datasets Ready. Train: {len(train_dataset)} | Val: {len(val_dataset)}")
     return train_dataset, val_dataset, train_df, val_df
 
 # -----------------------------------------------------------------------------
@@ -204,34 +218,28 @@ def load_data(config: dict, tokenizer) -> Tuple[CodeDataset, CodeDataset, pd.Dat
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     from transformers import AutoTokenizer
-    
-    print("\n[Self-Test] verifying Dataset Logic...")
+    # Simple test to verify shapes
     try:
-        tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
-        
+        print("Testing Dataset...")
+        tok = AutoTokenizer.from_pretrained("microsoft/codebert-base")
         data = {
-            'code': ["print('hello')", "int x = 0;"],
-            'label': [0, 1],
-            'language': ['python', 'c++'], # 'c++' exists in map below
-            'generator': ['human', 'gpt']
+            'code': ["print('hello')" * 100, "int x=0;", "def foo(): pass"],
+            'label': [0, 1, 0],
+            'language': ['python', 'cpp', 'python'] # Python dominante
         }
         df = pd.DataFrame(data)
         
-        # Define mock language map
-        lang_map = {'python': 0, 'c++': 1}
+        # Test Balancing
+        # Se target=1, python dovrebbe scendere da 2 a 1 campione
+        balanced = balance_languages(df, target_samples=1)
+        assert len(balanced) == 2 # 1 python + 1 cpp
+        print("Balancing Logic OK.")
         
-        ds = CodeDataset(df, tokenizer, lang_map, max_length=32, augment=True)
+        # Test Dataset Item
+        ds = CodeDataset(balanced, tok, {'python': 0, 'cpp': 1}, max_length=128, augment=True)
         item = ds[0]
-        
-        print(f"Input IDs Shape: {item['input_ids'].shape}")
-        print(f"Lang ID: {item['lang_ids']} (Expected: 0 for python)")
-        
-        # Test unknown language
-        data_unknown = {'code': ["echo 'hi'"], 'label': [0], 'language': ['bash'], 'generator': ['human']}
-        ds_unk = CodeDataset(pd.DataFrame(data_unknown), tokenizer, lang_map, max_length=32)
-        print(f"Unknown Lang ID: {ds_unk[0]['lang_ids']} (Expected: -1)")
-        
-        print("Dataset Logic Valid.")
-        
+        print("Item keys:", item.keys())
+        print("Input shape:", item['input_ids'].shape)
+        print("Test Passed.")
     except Exception as e:
-        print(f"Dataset Logic Failed: {e}")
+        print(f"Test Failed: {e}")

@@ -2,9 +2,11 @@ import random
 import logging
 import gc
 import pandas as pd
+import numpy as np
 import torch
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
 from torch.utils.data import Dataset
+from sklearn.model_selection import train_test_split
 
 # -----------------------------------------------------------------------------
 # Logger Setup
@@ -18,56 +20,71 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 # -----------------------------------------------------------------------------
-# Label Mapping (Task B)
+# 1. MAPPINGS & CONFIGURATION
 # -----------------------------------------------------------------------------
-# 31 Classes - Critical for Task B
+# ID univoci per le 31 classi
 GENERATOR_MAP = {
-    '01-ai/yi-coder-1.5b': 0,
-    '01-ai/yi-coder-1.5b-chat': 1,
-    'bigcode/starcoder': 2,
-    'bigcode/starcoder2-15b': 3,
-    'bigcode/starcoder2-3b': 4,
-    'deepseek-ai/deepseek-coder-1.3b-base': 5,
-    'deepseek-ai/deepseek-r1': 6,
-    'deepseek-ai/deepseek-v3-0324': 7,
-    'gemma-3-27b-it': 8,
-    'gemma-3n-e4b-it': 9,
-    'google/codegemma-2b': 10,
+    '01-ai/yi-coder-1.5b': 0, '01-ai/yi-coder-1.5b-chat': 1,
+    'bigcode/starcoder': 2, 'bigcode/starcoder2-15b': 3, 'bigcode/starcoder2-3b': 4,
+    'deepseek-ai/deepseek-coder-1.3b-base': 5, 'deepseek-ai/deepseek-r1': 6, 'deepseek-ai/deepseek-v3-0324': 7,
+    'gemma-3-27b-it': 8, 'gemma-3n-e4b-it': 9, 'google/codegemma-2b': 10,
     'gpt-4o': 11,
     'human': 12,
-    'ibm-granite/granite-3.2-2b-instruct': 13,
-    'ibm-granite/granite-3.3-8b-base': 14,
-    'ibm-granite/granite-3.3-8b-instruct': 15,
-    'meta-llama/llama-3.1-8b': 16,
-    'meta-llama/llama-3.1-8b-instruct': 17,
-    'meta-llama/llama-3.2-11b-vision-instruct': 18,
-    'meta-llama/llama-3.2-1b': 19,
-    'meta-llama/llama-3.2-3b': 20,
-    'microsoft/phi-3-medium-4k-instruct': 21,
-    'microsoft/phi-3-mini-4k-instruct': 22,
-    'microsoft/phi-3-small-8k-instruct': 23,
-    'mistralai/devstral-small-2505': 24,
-    'mistralai/mistral-7b-instruct-v0.3': 25,
-    'qwen/qwen2.5-72b-instruct': 26,
-    'qwen/qwen2.5-codder-14b-instruct': 27,
-    'qwen/qwen2.5-coder-1.5b': 28,
-    'qwen/qwen2.5-coder-1.5b-instruct': 29,
-    'qwen/qwq-32b': 30,
+    'ibm-granite/granite-3.2-2b-instruct': 13, 'ibm-granite/granite-3.3-8b-base': 14, 'ibm-granite/granite-3.3-8b-instruct': 15,
+    'meta-llama/llama-3.1-8b': 16, 'meta-llama/llama-3.1-8b-instruct': 17, 'meta-llama/llama-3.2-11b-vision-instruct': 18,
+    'meta-llama/llama-3.2-1b': 19, 'meta-llama/llama-3.2-3b': 20,
+    'microsoft/phi-3-medium-4k-instruct': 21, 'microsoft/phi-3-mini-4k-instruct': 22, 'microsoft/phi-3-small-8k-instruct': 23,
+    'mistralai/devstral-small-2505': 24, 'mistralai/mistral-7b-instruct-v0.3': 25,
+    'qwen/qwen2.5-72b-instruct': 26, 'qwen/qwen2.5-codder-14b-instruct': 27, 'qwen/qwen2.5-coder-1.5b': 28,
+    'qwen/qwen2.5-coder-1.5b-instruct': 29, 'qwen/qwq-32b': 30,
+}
+
+# Raggruppamento per famiglia (Essenziale per validazione "Unseen")
+FAMILY_MAP = {
+    'yi': ['01-ai/yi-coder-1.5b', '01-ai/yi-coder-1.5b-chat'],
+    'bigcode': ['bigcode/starcoder', 'bigcode/starcoder2-15b', 'bigcode/starcoder2-3b'],
+    'deepseek': ['deepseek-ai/deepseek-coder-1.3b-base', 'deepseek-ai/deepseek-r1', 'deepseek-ai/deepseek-v3-0324'],
+    'gemma': ['gemma-3-27b-it', 'gemma-3n-e4b-it', 'google/codegemma-2b'],
+    'gpt': ['gpt-4o'],
+    'human': ['human'],
+    'granite': ['ibm-granite/granite-3.2-2b-instruct', 'ibm-granite/granite-3.3-8b-base', 'ibm-granite/granite-3.3-8b-instruct'],
+    'llama': ['meta-llama/llama-3.1-8b', 'meta-llama/llama-3.1-8b-instruct', 'meta-llama/llama-3.2-11b-vision-instruct', 'meta-llama/llama-3.2-1b', 'meta-llama/llama-3.2-3b'],
+    'phi': ['microsoft/phi-3-medium-4k-instruct', 'microsoft/phi-3-mini-4k-instruct', 'microsoft/phi-3-small-8k-instruct'],
+    'mistral': ['mistralai/devstral-small-2505', 'mistralai/mistral-7b-instruct-v0.3'],
+    'qwen': ['qwen/qwen2.5-72b-instruct', 'qwen/qwen2.5-codder-14b-instruct', 'qwen/qwen2.5-coder-1.5b', 'qwen/qwen2.5-coder-1.5b-instruct', 'qwen/qwq-32b']
 }
 
 # -----------------------------------------------------------------------------
-# PyTorch Dataset Class with Sliding Window
+# 2. DATA AUGMENTATION LOGIC
+# -----------------------------------------------------------------------------
+class CodeAugmenter:
+    """
+    Augmentation specifica per il codice.
+    Non altera la semantica gravemente, ma cambia la formattazione per evitare overfitting.
+    """
+    @staticmethod
+    def whitespace_noise(code: str, prob: float = 0.3) -> str:
+        """Inserisce o rimuove a capo/spazi casualmente."""
+        if random.random() > prob:
+            return code
+            
+        lines = code.split('\n')
+        new_lines = []
+        for line in lines:
+            # 10% chance di aggiungere una riga vuota
+            if random.random() < 0.1:
+                new_lines.append("") 
+            new_lines.append(line)
+            # 5% chance di aggiungere spazi alla fine
+            if random.random() < 0.05:
+                new_lines[-1] += " " * random.randint(1, 4)
+                
+        return '\n'.join(new_lines)
+
+# -----------------------------------------------------------------------------
+# 3. DATASET CLASS
 # -----------------------------------------------------------------------------
 class CodeDataset(Dataset):
-    """
-    Advanced Dataset for Code Classification on Limited Hardware.
-    
-    Features:
-    1. Sliding Window Chunking (Training): Splits long files into multiple samples.
-       This dramatically increases effective training data and coverage without OOM.
-    2. Head+Tail Truncation (Validation): Keeps the start and end of code for robustness.
-    3. Memory Efficient: Does not hold tokenized tensors in RAM; tokenizes on the fly.
-    """
     def __init__(
         self, 
         dataframe: pd.DataFrame, 
@@ -76,58 +93,41 @@ class CodeDataset(Dataset):
         mode: str = "train", 
         overlap: int = 128
     ):
-        """
-        Args:
-            dataframe: The source data.
-            tokenizer: HF Tokenizer.
-            max_length: Model context size (use 512 for UniXCoder).
-            mode: 'train' (uses sliding window) or 'val' (deterministic).
-            overlap: Overlap between chunks in sliding window.
-        """
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.mode = mode
         self.overlap = overlap
         self.mask_token_id = tokenizer.mask_token_id
         
-        # --- Pre-Compute Indices for Sliding Window ---
-        # Instead of just storing the dataframe, we store a list of (row_idx, chunk_idx)
-        # to map __getitem__ index to a specific chunk of a specific file.
         self.samples = []
+        # Reset index per evitare bug con iloc
         self.data = dataframe.reset_index(drop=True)
         
-        logger.info(f"Preparing dataset in {mode} mode...")
-        
-        # Estimate token count roughly (chars / 3.5) to speed up setup
-        # If code is short, we just keep it as 1 chunk.
-        # If long, and mode is TRAIN, we split it.
+        logger.info(f"Initializing Dataset ({mode}). Rows: {len(self.data)}")
         
         if self.mode == "train":
-            for idx, row in self.data.iterrows():
-                code_len = len(row['code'])
-                # Rough token estimate
-                est_tokens = code_len / 3.5 
-                
-                if est_tokens <= max_length:
-                    self.samples.append((idx, 0, -1)) # (row_idx, start_char, end_char) -1 means full
-                else:
-                    # Create chunks
-                    # We work in characters here for speed, assuming avg token is 3-4 chars
-                    # Stride in chars
-                    chunk_char_len = int(max_length * 3.5)
-                    stride = int((max_length - overlap) * 3.5)
-                    
-                    for start in range(0, code_len, stride):
-                        # Don't add tiny chunks at the end
-                        if start + 50 < code_len: 
-                            self.samples.append((idx, start, start + chunk_char_len))
+            # Sliding Window per il training: più dati, copertura totale
+            self._prepare_sliding_window()
         else:
-            # Validation/Test: No chunking expansion to keep metrics comparable.
-            # We will handle long files by Head+Tail truncation inside __getitem__
-            for idx in range(len(self.data)):
-                self.samples.append((idx, 0, -1))
+            # Validation/Test: 1 campione = 1 entry (con Head+Tail truncation)
+            self.samples = [(i, 0, -1) for i in range(len(self.data))]
 
-        logger.info(f"Dataset expansion: {len(self.data)} files -> {len(self.samples)} samples.")
+    def _prepare_sliding_window(self):
+        """Pre-calcola gli indici per lo sliding window."""
+        stride_tokens = int(self.max_length * 0.75) # 25% overlap
+        # Stima conservativa chars -> tokens (1 token ~= 3.5 chars)
+        stride_chars = int(stride_tokens * 3.5)
+        window_chars = int(self.max_length * 3.5)
+
+        for idx, row in self.data.iterrows():
+            code_len = len(row['code'])
+            if code_len <= window_chars:
+                self.samples.append((idx, 0, -1))
+            else:
+                for start in range(0, code_len, stride_chars):
+                    # Evita chunk troppo piccoli alla fine (< 50 chars)
+                    if start + 50 < code_len:
+                        self.samples.append((idx, start, start + window_chars))
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -138,27 +138,24 @@ class CodeDataset(Dataset):
         
         code = str(row["code"])
         label = int(row["label"])
-        
-        # --- 1. Slicing Strategy ---
+
+        # 1. Slicing Strategy
         if self.mode == "train":
-            if end != -1:
-                # Sliding Window Slice
-                text_chunk = code[start:end]
-            else:
-                text_chunk = code
+            # Sliding Window
+            text_chunk = code[start:end] if end != -1 else code
+            # Augmentation
+            text_chunk = CodeAugmenter.whitespace_noise(text_chunk)
         else:
-            # Validation: Head + Tail Strategy
-            # If code is too long, we take the first (MAX/2) and last (MAX/2) characters
-            # This captures imports (Head) and return logic (Tail).
+            # Head + Tail Truncation per Validation
+            # Prende l'inizio (imports, definizioni) e la fine (return, main)
             limit = int(self.max_length * 3.5)
             if len(code) > limit:
-                half = limit // 2
-                text_chunk = code[:half] + "\n...[SNIP]...\n" + code[-half:]
+                split_point = limit // 2
+                text_chunk = code[:split_point] + "\n" + code[-split_point:]
             else:
                 text_chunk = code
 
-        # --- 2. Tokenization ---
-        # Note: 'truncation=True' handles any remaining excess length
+        # 2. Tokenization
         encoding = self.tokenizer(
             text_chunk,
             truncation=True,
@@ -170,9 +167,9 @@ class CodeDataset(Dataset):
         input_ids = encoding["input_ids"].squeeze(0)
         attention_mask = encoding["attention_mask"].squeeze(0)
 
-        # --- 3. Augmentation (Train only) ---
-        # Low probability MLM to make model robust to variable naming changes
-        if self.mode == "train" and random.random() < 0.1: # 10% chance to apply masking
+        # 3. Augmentation: Token Masking (MLM style)
+        # Rende il modello robusto a cambiamenti di nome variabili
+        if self.mode == "train" and random.random() < 0.15:
             probability_matrix = torch.full(input_ids.shape, 0.15)
             special_tokens_mask = self.tokenizer.get_special_tokens_mask(
                 input_ids.tolist(), already_has_special_tokens=True
@@ -189,73 +186,78 @@ class CodeDataset(Dataset):
         }
 
 # -----------------------------------------------------------------------------
-# Data Preprocessing Logic
+# 4. PREPROCESSING & SPLITTING STRATEGIES
 # -----------------------------------------------------------------------------
-def load_and_preprocess(
-    file_path: str, 
-    max_code_len: int = 20000, # Hard char limit to save RAM initially
-    task_type: str = "multiclass"
-) -> pd.DataFrame:
-    """
-    Loads Parquet file and applies task-specific preprocessing.
-    """
-    logger.info(f"Loading data from {file_path} (Task: {task_type})")
-    
+def load_base_dataframe(file_path: str, task_type: str = "multiclass") -> pd.DataFrame:
+    """Carica e pulisce il dataframe base."""
     columns = ['code', 'language', 'generator']
-    if task_type == "binary":
+    if task_type == "binary" and 'label' in pd.read_parquet(file_path).columns:
         columns.append('label')
-        
-    try:
-        df = pd.read_parquet(file_path, columns=columns)
-    except Exception as e:
-        logger.error(f"Failed to load data from {file_path}: {e}")
-        raise e
-    
-    # 1. Clean Data
+
+    df = pd.read_parquet(file_path, columns=columns)
     df = df.dropna(subset=['code']).reset_index(drop=True)
+    df = df[df['code'].str.len() > 20].copy() # Rimuove snippet inutilizzabili
+    
+    # Normalizzazione
+    df['generator'] = df['generator'].str.lower()
     df['language'] = df['language'].str.lower()
-    
-    # 2. Filter useless short snippets (less than 20 chars usually garbage)
-    df = df[df['code'].str.len() > 20].copy()
-    
-    # 3. Hard Cap on Length (Memory Safety)
-    # Truncate extremely long files at character level before anything else
-    df['code'] = df['code'].str.slice(0, max_code_len)
-    
-    # 4. Label Mapping
+
     if task_type == "multiclass":
-        if 'generator' not in df.columns:
-            raise ValueError("Task B requires 'generator' column.")
-            
-        df['generator'] = df['generator'].str.lower()
-        
-        # Filter unknown classes strictly
+        # Filtra solo generatori noti
         known_gens = set(GENERATOR_MAP.keys())
         df = df[df['generator'].isin(known_gens)].copy()
-        
         df['label'] = df['generator'].map(GENERATOR_MAP).astype(int)
-        
-    elif task_type == "binary":
-        if 'label' not in df.columns:
-             raise ValueError("Task A requires 'label' column (0/1).")
-        df['label'] = df['label'].astype(int)
-    
-    # Explicit garbage collection
-    gc.collect()
     
     return df
 
-def balance_languages(df: pd.DataFrame, fraction: float = 1.0, max_samples: int = 2000) -> pd.DataFrame:
+def create_unseen_author_split(df: pd.DataFrame, val_size: float = 0.1) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Balances the dataset by capping the maximum samples per language/label pair.
-    This prevents Python/Java from dominating rare languages.
+    STRATEGIA VINCENTE: Simula 'Unseen Authors'.
+    Invece di splittare a caso, riserva interi modelli per la validazione.
     """
-    logger.info("Balancing dataset distribution...")
-    # Group by both language and label to ensure we don't lose specific generators in specific languages
-    df_list = []
+    logger.info("Creating 'Unseen Author' Validation Split...")
+    val_indices = []
     
-    # Create stratification key
-    df['strat_key'] = df['language'] + "_" + df['label'].astype(str)
+    # Per ogni famiglia, cerchiamo di mettere 1 modello interamente in validation
+    for family, models in FAMILY_MAP.items():
+        available_models = [m for m in models if m in df['generator'].unique()]
+        
+        if len(available_models) > 1:
+            # Se la famiglia ha più modelli, ne prendiamo uno a caso come 'unseen'
+            # (tranne human che va splittato randomicamente)
+            if family == 'human':
+                human_indices = df[df['generator'] == 'human'].index
+                # Prendi un 10% random di umani
+                val_subset = np.random.choice(human_indices, size=int(len(human_indices) * val_size), replace=False)
+                val_indices.extend(val_subset)
+            else:
+                # Scegli un modello da escludere dal training (es. Llama-3.2-1b)
+                # Preferiamo modelli con meno dati per non impoverire troppo il train
+                models_sorted_by_count = df[df['generator'].isin(available_models)]['generator'].value_counts().index.tolist()
+                # Prendiamo il secondo o l'ultimo (quello con meno dati o intermedio)
+                held_out_model = models_sorted_by_count[-1] 
+                
+                logger.info(f"Holding out model for validation: {held_out_model} (Family: {family})")
+                val_indices.extend(df[df['generator'] == held_out_model].index)
+        
+        elif len(available_models) == 1:
+            # Se c'è un solo modello (es. GPT-4o), dobbiamo fare split random classico
+            single_model_indices = df[df['generator'] == available_models[0]].index
+            val_subset = np.random.choice(single_model_indices, size=int(len(single_model_indices) * val_size), replace=False)
+            val_indices.extend(val_subset)
+
+    val_df = df.loc[val_indices].copy()
+    train_df = df.drop(val_indices).copy()
+    
+    # Shuffle
+    return train_df.sample(frac=1, random_state=42), val_df.sample(frac=1, random_state=42)
+
+def balance_languages(df: pd.DataFrame, max_samples: int = 5000) -> pd.DataFrame:
+    """Evita che Python domini il dataset."""
+    df_list = []
+    # Raggruppa per Label (Modello) E Linguaggio
+    # Così garantiamo che anche modelli rari in linguaggi rari siano preservati
+    df['strat_key'] = df['generator'] + "_" + df['language']
     
     for _, group in df.groupby('strat_key'):
         if len(group) > max_samples:
@@ -263,56 +265,64 @@ def balance_languages(df: pd.DataFrame, fraction: float = 1.0, max_samples: int 
         else:
             df_list.append(group)
             
-    balanced_df = pd.concat(df_list).sample(frac=1, random_state=42).reset_index(drop=True)
-    balanced_df = balanced_df.drop(columns=['strat_key'])
-    
-    gc.collect()
-    return balanced_df
+    balanced = pd.concat(df_list).sample(frac=1, random_state=42).reset_index(drop=True)
+    balanced = balanced.drop(columns=['strat_key'])
+    return balanced
 
 # -----------------------------------------------------------------------------
-# Main Data Loading Interface
+# MAIN INTERFACE
 # -----------------------------------------------------------------------------
 def load_data(config: dict, tokenizer) -> Tuple[CodeDataset, CodeDataset, pd.DataFrame, pd.DataFrame]:
     """
-    Orchestrates data loading pipeline.
+    Carica i dati e prepara i Dataset PyTorch.
     """
-    logger.info("Starting Data Pipeline...")
+    logger.info(">>> Starting Data Loading Pipeline <<<")
     
-    task_type = config["data"].get("task_type", "multiclass")
-    max_len  = config["data"].get("max_length", 512) # Increased to 512 for better context
-
-    # 1. Load Data
-    train_df = load_and_preprocess(config["data"]["train_path"], task_type=task_type)
-    val_df   = load_and_preprocess(config["data"]["val_path"], task_type=task_type)
+    # 1. Load Raw Data
+    # Carichiamo sia train che validation originali, e li uniamo per rifare lo split noi
+    df_train_raw = load_base_dataframe(config["data"]["train_path"])
     
-    # 2. Balancing (Optional but Recommended)
-    if config["data"].get("balance_languages", False):
-        train_df = balance_languages(train_df, max_samples=config["data"].get("samples_per_group", 3000))
+    # Opzionale: se hai un validation.parquet fornito, lo uniamo al train per poi risplittare
+    # intelligentemente, OPPURE lo usiamo come test set aggiuntivo.
+    # Per sicurezza, uniamo tutto e rifacciamo lo split per garantire la logica "Unseen".
+    if "val_path" in config["data"] and config["data"]["val_path"]:
+        try:
+            df_val_raw = load_base_dataframe(config["data"]["val_path"])
+            full_df = pd.concat([df_train_raw, df_val_raw], ignore_index=True)
+        except:
+            full_df = df_train_raw
+    else:
+        full_df = df_train_raw
 
-    # 3. Demo/Debug Mode
+    # 2. Demo Mode
     if config.get("demo", {}).get("active", False):
-        logger.warning("DEMO MODE: Using 10% of data")
-        train_df = train_df.sample(frac=0.1).reset_index(drop=True)
-        val_df = val_df.sample(frac=0.1).reset_index(drop=True)
+        logger.warning("!!! DEMO MODE ACTIVE - Using tiny subset !!!")
+        full_df = full_df.sample(n=2000, random_state=42)
 
-    # 4. Create Datasets with Different Modes
-    # Train gets Sliding Window (Data Augmentation)
+    # 3. Balancing (Opzionale ma raccomandato per T4 per non sprecare epoche su Python)
+    if config["data"].get("balance_languages", True):
+        full_df = balance_languages(full_df, max_samples=4000)
+
+    # 4. Strategic Splitting
+    # Qui creiamo il vero set di addestramento e validazione
+    train_df, val_df = create_unseen_author_split(full_df, val_size=0.15)
+    
+    logger.info(f"Train Rows: {len(train_df)} | Val Rows: {len(val_df)}")
+    logger.info(f"Train Classes: {train_df['label'].nunique()} | Val Classes: {val_df['label'].nunique()}")
+
+    # 5. Dataset Creation
     train_dataset = CodeDataset(
         train_df, 
         tokenizer, 
-        max_length=max_len, 
-        mode="train",
-        overlap=128
+        max_length=config["data"].get("max_length", 512), 
+        mode="train"
     )
     
-    # Val gets Head+Tail (Deterministic Evaluation)
     val_dataset = CodeDataset(
         val_df, 
         tokenizer, 
-        max_length=max_len, 
+        max_length=config["data"].get("max_length", 512), 
         mode="val"
     )
 
-    logger.info(f"Final Setup -> Train Samples: {len(train_dataset)} | Val Samples: {len(val_dataset)}")
-    
     return train_dataset, val_dataset, train_df, val_df

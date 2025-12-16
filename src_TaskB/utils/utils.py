@@ -1,6 +1,7 @@
 import torch
 import numpy as np
-from typing import Dict, List
+import gc
+from typing import Dict, List, Tuple
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from torch.amp import autocast
 from tqdm import tqdm
@@ -11,26 +12,13 @@ from tqdm import tqdm
 def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
     """
     Computes classification metrics aligned with SemEval competition standards.
-    
-    Why Macro F1?
-    The competition datasets may have class imbalances (e.g., more Human code than AI).
-    Macro-averaging calculates metrics independently for each class and then takes 
-    the unweighted mean, treating all classes as equally important regardless of frequency.
-    
-    Args:
-        preds (List[int]): List of predicted class indices.
-        labels (List[int]): List of ground truth class indices.
-        
-    Returns:
-        Dict[str, float]: Dictionary containing Accuracy, Precision, Recall, and F1 (Macro).
     """
     preds = np.array(preds)
     labels = np.array(labels)
 
     accuracy = accuracy_score(labels, preds)
     
-    # Calculate Precision, Recall, and F1
-    # zero_division=0 prevents runtime warnings if a class is never predicted
+    # Macro F1 is the key metric for SemEval
     precision, recall, f1, _ = precision_recall_fscore_support(
         labels, 
         preds, 
@@ -46,42 +34,67 @@ def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
     }
 
 # -----------------------------------------------------------------------------
-# Inference & Evaluation Loop
+# Inference & Evaluation Loop (Optimized for T4/CUDA)
 # -----------------------------------------------------------------------------
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device) -> Tuple[Dict[str, float], List[int], List[int]]:
     """
-    Validation loop optimized for inference.
+    Validation loop optimized for inference stability on CUDA.
     """
     model.eval()
     predictions, references = [], []
     running_loss = 0.0
     
-    # Mixed precision context for inference too (speedup on M2)
-    device_type = device.type if device.type in ['cuda', 'mps'] else 'cpu'
-    dtype = torch.float16 if device_type != 'cpu' else torch.float32
+    # Rilevamento device type robusto per Autocast
+    if device.type == 'cuda':
+        device_type = 'cuda'
+        dtype = torch.float16
+    elif device.type == 'mps':
+        device_type = 'mps'
+        dtype = torch.float16
+    else:
+        device_type = 'cpu'
+        dtype = torch.bfloat16 # bfloat16 è meglio su CPU moderne, altrimenti float32
 
+    # Disabilita il calcolo dei gradienti per risparmiare memoria
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validating", leave=False):
+            # Non-blocking transfer per parallelizzare
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
 
+            # Inference context
             with autocast(device_type=device_type, dtype=dtype):
                 logits, loss = model(input_ids, attention_mask, labels=labels)
 
             if loss is not None:
                 running_loss += loss.item()
 
-            preds = torch.argmax(logits, dim=1).cpu().numpy()
-            labels_cpu = labels.cpu().numpy()
+            # Move to CPU for metrics
+            # .detach() è ridondante in no_grad ma buona pratica
+            preds = torch.argmax(logits, dim=1).detach().cpu().numpy()
+            labels_cpu = labels.detach().cpu().numpy()
             
             predictions.extend(preds)
             references.extend(labels_cpu)
             
-            # Memory housekeeping
-            del input_ids, attention_mask, labels, logits, loss
+            # Non serve cancellare input_ids esplicitamente qui dentro, 
+            # Python lo fa a fine scope, ma il gc finale è utile.
 
-    metrics = model.compute_metrics(predictions, references)
+    # Calcolo metriche usando il metodo interno del modello (se esiste) o quello generico
+    if hasattr(model, "compute_metrics"):
+        metrics = model.compute_metrics(predictions, references)
+    else:
+        metrics = compute_metrics(predictions, references)
+        
     metrics["loss"] = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
+    
+    # PULIZIA CRITICA: Forza il rilascio della memoria GPU
+    # Senza questo, potresti avere OOM all'inizio del prossimo epoch di training
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+    elif device.type == 'mps':
+        torch.mps.empty_cache()
+    gc.collect()
     
     return metrics, predictions, references

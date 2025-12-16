@@ -65,7 +65,7 @@ class CodeClassifier(nn.Module):
         self.base_model = AutoModel.from_pretrained(self.model_name)
 
         # Gradient Checkpointing (Memory optimization)
-        self.base_model.gradient_checkpointing_enable()
+        # self.base_model.gradient_checkpointing_enable()
         self.hidden_size = self.base_model.config.hidden_size
 
         # Inject dropout into transformer

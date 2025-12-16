@@ -43,19 +43,10 @@ def run_inference_pipeline(
 ):
     """
     Executes the full inference pipeline: Dataset prep -> Inference -> CSV Generation.
-    
-    Args:
-        model_wrapper: The loaded PyTorch model.
-        test_df: Pandas DataFrame containing test samples.
-        id_col_name: Name of the column containing unique sample IDs.
-        output_file: Destination path for the CSV submission.
-        device: Computational device.
-        batch_size: Inference batch size (can be higher than training).
     """
     model_wrapper.eval()
     
     # Initialize Dataset
-    # Note: Ensure augmentation is DISABLED in InferenceDataset logic or via flags if shared
     dataset = InferenceDataset(
         dataframe=test_df, 
         tokenizer=model_wrapper.tokenizer, 
@@ -63,9 +54,6 @@ def run_inference_pipeline(
         id_col=id_col_name
     )
     
-    # DataLoader Optimization
-    # - num_workers=2: Decouples data loading from GPU computation.
-    # - pin_memory: Disabled for MPS stability, enable for CUDA if needed.
     dataloader = DataLoader(
         dataset, 
         batch_size=batch_size, 
@@ -104,9 +92,10 @@ def run_inference_pipeline(
             ids.extend(batch_ids)
             predictions.extend(preds)
 
-    # Artifact Generation
+    # Artifact Generation - CORRETTO QUI
+    # Usiamo id_col_name (es. "ID") invece di "id" fisso
     submission_df = pd.DataFrame({
-        "id": ids,
+        id_col_name: ids,  
         "label": predictions
     })
     
@@ -174,7 +163,6 @@ def main():
         sys.exit(1)
 
     # 5. Data Ingestion
-    # Defines the target test file. Defaults to ./data/test.parquet if env var not set.
     test_path = "data/Task_A/test.parquet"
     
     if not os.path.exists(test_path):
@@ -200,7 +188,6 @@ def main():
     logger.info(f"Target ID Column: '{id_col_name}'")
 
     # 7. Pre-processing
-    # Hard truncation to prevent OOM on anomalously large files before tokenization
     df['code'] = df['code'].str.slice(0, 4096)
 
     # 8. Execution
@@ -213,7 +200,7 @@ def main():
             id_col_name=id_col_name, 
             output_file=output_file, 
             device=device,
-            batch_size=32 # Adjusted for M2 memory bandwidth
+            batch_size=32 
         )
     except KeyboardInterrupt:
         logger.warning("Process interrupted by user.")
