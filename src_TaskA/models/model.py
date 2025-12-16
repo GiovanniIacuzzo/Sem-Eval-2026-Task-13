@@ -36,6 +36,9 @@ class GradientReversalFn(torch.autograd.Function):
 # -----------------------------------------------------------------------------
 # 2. Attention Pooling
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 2. Attention Pooling (FIXED FOR FP16)
+# -----------------------------------------------------------------------------
 class AttentionHead(nn.Module):
     """Pooling intelligente che impara quali token sono importanti."""
     def __init__(self, hidden_size, dropout_prob=0.1):
@@ -49,7 +52,17 @@ class AttentionHead(nn.Module):
 
     def forward(self, hidden_states, attention_mask):
         attn_scores = self.attn(hidden_states).squeeze(-1)
-        attn_scores = attn_scores.masked_fill(attention_mask == 0, -1e9)
+        
+        # --- FIX CRITICO PER FP16 ---
+        # In float16 il minimo è circa -65500. -1e9 causa crash.
+        # Usiamo il minimo valore possibile per il dtype corrente o -1e4 che è sicuro.
+        if attn_scores.dtype == torch.float16:
+             min_val = -1e4 # -10.000 è sufficiente per azzerare la softmax
+        else:
+             min_val = -1e9
+
+        attn_scores = attn_scores.masked_fill(attention_mask == 0, min_val)
+        
         attn_weights = self.dropout(F.softmax(attn_scores, dim=-1))
         return torch.sum(attn_weights.unsqueeze(-1) * hidden_states, dim=1)
 

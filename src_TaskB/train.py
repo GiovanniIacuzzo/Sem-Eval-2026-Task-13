@@ -4,11 +4,9 @@ import logging
 import yaml
 import torch
 import argparse
-import gc
 import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-# Import corretto per PyTorch moderno
 from torch.amp import autocast, GradScaler 
 from dotenv import load_dotenv
 from sklearn.metrics import confusion_matrix

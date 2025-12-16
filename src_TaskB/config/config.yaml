@@ -9,8 +9,6 @@
 data:
   # Percorsi
   train_path: "data/Task_B/train.parquet"
-  # Il validation path è opzionale: se presente, viene unito al train 
-  # e poi lo script 'dataset.py' rigenera lo split "Unseen Author"
   val_path: "data/Task_B/validation.parquet" 
   
   # Context Length

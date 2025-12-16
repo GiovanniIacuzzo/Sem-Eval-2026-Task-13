@@ -14,6 +14,9 @@ from torch.amp import autocast
 from dotenv import load_dotenv
 from typing import List, Dict, Tuple
 
+# Importa PEFT per gestire LoRA
+from peft import PeftModel
+
 from src_TaskA.models.model import CodeClassifier
 from src_TaskA.dataset.dataset import CodeDataset, load_and_preprocess
 from src_TaskA.utils.utils import compute_metrics
@@ -30,21 +33,89 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ConsoleUX:
-    """Helper class for consistent and readable console output."""
     @staticmethod
     def print_banner(text: str):
         print(f"\n{'-'*60}\n{text.center(60)}\n{'-'*60}")
 
     @staticmethod
     def log_metrics(metrics: Dict[str, float]):
-        """Formats evaluation metrics into a clean log string."""
         log_str = "[Results] "
         for k, v in metrics.items():
             log_str += f"{k.capitalize()}: {v:.4f} | "
         logger.info(log_str.strip(" | "))
 
 # -----------------------------------------------------------------------------
-# Inference Logic
+# Advanced Model Loading Logic (FIXED)
+# -----------------------------------------------------------------------------
+def load_model_for_inference(config_path: str, checkpoint_dir: str, device: torch.device):
+    """
+    Carica il modello gestendo sia LoRA che Full Fine-Tuning.
+    FIX: Priorità al caricamento di 'best_model_taskA.pt' (nuovo train).
+    """
+    # 1. Load Config
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    logger.info("Initializing Model Architecture...")
+    # Inizializza il modello vuoto (pesi random per le teste)
+    model = CodeClassifier(config)
+    
+    # Paths possibili
+    # Caso A: LoRA (Adapter + Heads separate)
+    adapter_path = os.path.join(checkpoint_dir)
+    heads_path = os.path.join(checkpoint_dir, "heads.pt")
+    
+    # Caso B: Full Model
+    # PRIORITÀ AL NUOVO NOME DEL FILE
+    new_model_path = os.path.join(checkpoint_dir, "best_model_taskA.pt")
+    old_model_path = os.path.join(checkpoint_dir, "best_model.pt")
+
+    # Verifica presenza LoRA
+    is_lora = os.path.exists(os.path.join(checkpoint_dir, "adapter_config.json"))
+    
+    if is_lora:
+        logger.info(f"Detected LoRA checkpoint in {checkpoint_dir}")
+        model.base_model = PeftModel.from_pretrained(model.base_model, adapter_path)
+        
+        if os.path.exists(heads_path):
+            logger.info(f"Loading custom heads from {heads_path}...")
+            # weights_only=False necessario per i dizionari complessi
+            heads_state = torch.load(heads_path, map_location=device, weights_only=False)
+            
+            # Caricamento flessibile per evitare crash se mancano pezzi non critici
+            if 'classifier' in heads_state:
+                model.classifier.load_state_dict(heads_state['classifier'])
+            if 'pooler' in heads_state:
+                model.pooler.load_state_dict(heads_state['pooler'])
+            if 'projection' in heads_state:
+                model.projection_head.load_state_dict(heads_state['projection'])
+            
+            # Non carichiamo il language_classifier in inferenza se dà errori di size
+            # tanto non serve per predire Human vs AI
+        else:
+            logger.warning(f"Heads file ({heads_path}) NOT FOUND! Using random weights for classifier.")
+            
+    elif os.path.exists(new_model_path):
+        logger.info(f"Loading NEW Full Fine-Tuned model from {new_model_path}")
+        state_dict = torch.load(new_model_path, map_location=device, weights_only=False)
+        # strict=False per ignorare eventuali layer DANN vecchi che non matchano
+        model.load_state_dict(state_dict, strict=False)
+        
+    elif os.path.exists(old_model_path):
+        logger.warning(f"Found OLD model {old_model_path}. This might cause mismatches if architecture changed.")
+        logger.info(f"Loading OLD Full Fine-Tuned model from {old_model_path}")
+        state_dict = torch.load(old_model_path, map_location=device, weights_only=False)
+        model.load_state_dict(state_dict, strict=False)
+            
+    else:
+        raise FileNotFoundError(f"No valid checkpoint found in {checkpoint_dir}")
+
+    model.to(device)
+    model.eval()
+    return model
+
+# -----------------------------------------------------------------------------
+# Inference Pipeline
 # -----------------------------------------------------------------------------
 def run_inference(
     model_wrapper: CodeClassifier, 
@@ -52,28 +123,16 @@ def run_inference(
     device: torch.device, 
     batch_size: int = 32
 ) -> Tuple[List[int], List[int], Dict[str, float]]:
-    """
-    Executes the inference pipeline on the provided test dataset.
     
-    Optimizations:
-    - Disables Gradient Calculation: Reduces memory usage and computation time.
-    - Mixed Precision (MPS/CUDA): Utilizes FP16 for faster tensor operations.
-    - Increased Batch Size: Feasible since no gradients are stored.
-    """
-    model_wrapper.eval()
-
-    # NOTE: Augmentation must be False during inference to ensure 
-    # deterministic evaluation and fair comparison.
+    # Dataset senza augmentation
     dataset = CodeDataset(
         dataframe=test_df,
         tokenizer=model_wrapper.tokenizer,
+        language_map=getattr(model_wrapper, "language_map", {}), 
         max_length=model_wrapper.max_length,
         augment=False 
     )
     
-    # DataLoader Configuration:
-    # - num_workers=2: Pre-fetches data on CPU while GPU processes current batch.
-    # - pin_memory=False: Disabled for MPS compatibility (avoids warning).
     dataloader = DataLoader(
         dataset, 
         batch_size=batch_size, 
@@ -82,170 +141,86 @@ def run_inference(
         pin_memory=False
     )
 
-    all_preds = []
-    all_refs = []
-
+    all_preds, all_refs = [], []
     logger.info(f"Starting inference on {len(dataset)} samples...")
 
-    # Determine device type for autocast context
-    device_type = device.type if device.type in ['cuda', 'mps'] else 'cpu'
-    dtype = torch.float16 if device_type != 'cpu' else torch.float32
+    device_type = 'cuda' if device.type == 'cuda' else 'cpu'
+    dtype = torch.float16 if device_type == 'cuda' else torch.float32
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Inferencing", dynamic_ncols=True):
-            # Non-blocking transfer for asynchronous I/O
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
 
-            # Mixed Precision Context
             with autocast(device_type=device_type, dtype=dtype):
-                logits, _ = model_wrapper(input_ids, attention_mask)
+                # Alpha=0.0 disattiva DANN
+                logits, _ = model_wrapper(input_ids, attention_mask, alpha=0.0)
 
-            # Get class predictions
             preds = torch.argmax(logits, dim=1)
-
-            # Detach and move to CPU immediately to free VRAM
-            all_preds.extend(preds.detach().cpu().tolist())
-            all_refs.extend(labels.detach().cpu().tolist())
+            all_preds.extend(preds.cpu().tolist())
+            all_refs.extend(labels.cpu().tolist())
 
     metrics = compute_metrics(all_preds, all_refs)
     return all_preds, all_refs, metrics
 
 # -----------------------------------------------------------------------------
-# Visualization & Reporting
+# Visualization
 # -----------------------------------------------------------------------------
-def plot_confusion_matrix(y_true: List[int], y_pred: List[int], labels: List[int], save_path: str):
-    """
-    Generates and saves a Confusion Matrix heatmap.
-    Visualizes True Positives, False Positives, False Negatives, and True Negatives.
-    """
-
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+def save_artifacts(preds, refs, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
     
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(8, 6))
-    
+    cm = confusion_matrix(refs, preds)
+    plt.figure(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
-                xticklabels=labels, yticklabels=labels)
-    plt.xlabel("Predicted Label")
-    plt.ylabel("True Label")
-    plt.title("Confusion Matrix Analysis")
-    plt.tight_layout()
-    
-    plt.savefig(save_path)
+                xticklabels=["Human", "AI"], yticklabels=["Human", "AI"])
+    plt.title("Confusion Matrix")
+    plt.savefig(os.path.join(output_dir, "confusion_matrix.png"))
     plt.close()
-    logger.info(f"Confusion Matrix saved to: {save_path}")
-
-def generate_error_report(
-    df: pd.DataFrame, 
-    y_true: List[int], 
-    y_pred: List[int], 
-    save_path: str
-) -> pd.DataFrame:
-    """
-    Exports misclassified samples to CSV for qualitative analysis.
-    Useful for identifying patterns in model errors (e.g., specific languages).
-    """
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    errors = []
     
-    label_map = {0: "Human", 1: "AI"}
-
-    for idx, (t, p) in enumerate(zip(y_true, y_pred)):
-        if t != p:
-            row = df.iloc[idx]
-            errors.append({
-                "original_index": idx,
-                "language": row.get("language", "N/A"),
-                "true_label": f"{t} ({label_map.get(t, '?')})",
-                "predicted_label": f"{p} ({label_map.get(p, '?')})",
-                "code_snippet": row["code"][:200] + "..." # Truncate for readability
-            })
-
-    error_df = pd.DataFrame(errors)
-    error_df.to_csv(save_path, index=False)
-    
-    logger.info(f"Error Report generated: {save_path}")
-    logger.info(f"Total Misclassifications: {len(error_df)} / {len(df)}")
-    return error_df
+    report_df = pd.DataFrame({'True': refs, 'Pred': preds})
+    report_df.to_csv(os.path.join(output_dir, "predictions.csv"), index=False)
 
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
-    # Suppress HuggingFace parallelism warnings
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    ConsoleUX.print_banner("SemEval Task 13 - Robust Inference")
 
-    ConsoleUX.print_banner("SemEval Task 13 - Inference & Analysis")
+    # 1. Config
+    CONFIG_PATH = "src_TaskA/config/config.yaml"
+    CHECKPOINT_DIR = "results_TaskA/checkpoints" 
 
-    # 1. Configuration
-    try:
-        with open("src_TaskA/config/config.yaml", "r") as f:
-            config = yaml.safe_load(f)
-    except FileNotFoundError:
-        logger.error("Config file not found.")
-        sys.exit(1)
-
-    # 2. Device Setup
-    device = torch.device(
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
+    # 2. Device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
-    # 3. Model Initialization
-    logger.info("Initializing Model Architecture...")
-    model_wrapper = CodeClassifier(config)
-    model_wrapper.to(device)
-
-    # 4. Weight Loading
-    checkpoint_path = os.path.join(config["training"]["checkpoint_dir"], "best_model.pt")
-    if not os.path.exists(checkpoint_path):
-        logger.error(f"Checkpoint not found at {checkpoint_path}. Please train the model first.")
-        sys.exit(1)
-        
-    logger.info(f"Loading weights from: {checkpoint_path}")
+    # 3. Load Model
     try:
-        # Load state dict strictly to ensure architecture match
-        state_dict = torch.load(checkpoint_path, map_location=device)
-        model_wrapper.load_state_dict(state_dict)
+        model = load_model_for_inference(CONFIG_PATH, CHECKPOINT_DIR, device)
     except Exception as e:
-        logger.error(f"Failed to load weights: {e}")
+        logger.error(f"Failed to load model: {e}")
         sys.exit(1)
 
-    # 5. Data Loading
-    test_path = "data/Task_A/test_sample.parquet"
-
-    if not os.path.exists(test_path):
-        logger.error(f"Test file not found: {test_path}")
-        sys.exit(1)
-
-    logger.info(f"Loading Test Dataset: {test_path}")
-    test_df = load_and_preprocess(test_path)
+    # 4. Load Data
+    TEST_FILE = "data/Task_A/test_sample.parquet"
+    if not os.path.exists(TEST_FILE):
+        logger.warning(f"{TEST_FILE} not found. Trying validation set...")
+        TEST_FILE = "data/Task_A/validation.parquet"
     
-    # 6. Execution
-    preds, refs, metrics = run_inference(model_wrapper, test_df, device, batch_size=32)
+    if not os.path.exists(TEST_FILE):
+        logger.error("No dataset found for inference.")
+        sys.exit(1)
 
-    # 7. Reporting
-    ConsoleUX.print_banner("Final Results")
+    logger.info(f"Loading data from: {TEST_FILE}")
+    test_df = load_and_preprocess(TEST_FILE)
+
+    # 5. Run
+    preds, refs, metrics = run_inference(model, test_df, device)
+    
+    # 6. Results
     ConsoleUX.log_metrics(metrics)
-
-    print("\n" + classification_report(refs, preds, target_names=["Human (0)", "AI (1)"]))
-
-    # Artifact Generation
-    OUTPUT_DIR = "results_taskA/inference_analysis"
-    
-    plot_confusion_matrix(
-        refs, preds, labels=[0, 1], 
-        save_path=f"{OUTPUT_DIR}/confusion_matrix.png"
-    )
-    
-    generate_error_report(
-        test_df, refs, preds, 
-        save_path=f"{OUTPUT_DIR}/error_analysis.csv"
-    )
-
-    logger.info("Analysis completed successfully.")
+    print("\n" + classification_report(refs, preds, target_names=["Human", "AI"]))
+    save_artifacts(preds, refs, "results_TaskA/inference_output")
