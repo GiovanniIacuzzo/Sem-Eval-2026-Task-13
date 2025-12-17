@@ -1,0 +1,122 @@
+# ==========================================
+# SemEval 2026 Task 13 - Subtask B Config
+# Optimized for NVIDIA T4 (16GB VRAM)
+# Strategy: 11-Family Classification + DANN + SupCon + Weighted Loss
+# ==========================================
+
+# ---------------------
+# Dataset Configuration
+# ---------------------
+data:
+  train_path: "data/Task_B/train.parquet"
+  val_path: "data/Task_B/validation.parquet"
+  
+  # Context Length
+  # 512 è il sweet spot. Oltre (1024) su T4 rischiamo OOM o batch size = 1.
+  max_length: 512
+  
+  # Task Definition
+  task_type: "multiclass"
+  
+  # Augmentation
+  # Poiché le classi AI sono piccole (4k sample), l'augmentation nel codice
+  # (structural noise) è fondamentale. Qui controlliamo solo se attivarla.
+  augment_minority: True
+
+# ---------------------
+# Model Architecture
+# ---------------------
+model:
+  # UniXCoder è eccellente, ma se vuoi variare, 'microsoft/codebert-base' 
+  # è spesso più stabile per classificazione pura.
+  model_name: "microsoft/unixcoder-base"
+  
+  # --- CRITICAL UPDATE: 11 FAMIGLIE ---
+  # 0: Human
+  # 1-10: AI Families (01-ai, BigCode, DeepSeek, Gemma, Phi, Llama, Granite, Mistral, Qwen, OpenAI)
+  num_labels: 11
+  
+  # --- LORA CONFIGURATION (Power Up) ---
+  use_lora: true
+  
+  # Aumentiamo il Rank (r) da 32 a 64.
+  # Motivo: Distinguere Llama 3 da Mistral 7B è molto sottile.
+  # Serve più "capacità" trainable rispetto al task Human vs AI.
+  lora_r: 64
+  lora_alpha: 128
+  lora_dropout: 0.05 # Ridotto per non perdere info su classi rare
+  
+  # --- DANN TARGETS ---
+  # Linguaggi su cui vogliamo essere invarianti.
+  languages:
+    - python
+    - java
+    - c++
+    - c
+    - c#
+    - javascript
+    - typescript
+    - go
+    - php
+    - ruby
+    - rust
+    - kotlin
+    - swift
+    - shell
+
+# ---------------------
+# Training Hyperparameters
+# ---------------------
+training:
+  output_dir: "results_TaskB"
+  checkpoint_dir: "./results_TaskB/checkpoints"
+  log_dir: "./results_TaskB/logs"
+  
+  # --- STRATEGIA DI TEMPISTICHE ---
+  # 15 Epoche sono sufficienti grazie ai Class Weights.
+  # Se andiamo oltre, rischiamo overfitting sulla classe "Human" nonostante i pesi.
+  num_epochs: 15
+  early_stop_patience: 4
+  
+  # --- MEMORY & BATCH TUNING (SupCon Strategy) ---
+  # La SupCon Loss FUNZIONA SOLO se nel batch ci sono esempi della stessa classe.
+  # Con batch piccolo (8/16), le classi rare potrebbero apparire da sole -> Loss = 0.
+  # Dobbiamo massimizzare la batch size.
+  
+  batch_size: 16  # Massimo fisico su T4 con fp16 e context 512
+  
+  # Accumuliamo per simulare una batch size di 64.
+  # 16 * 4 = 64. Questo stabilizza la SupCon Loss.
+  gradient_accumulation_steps: 4
+  
+  # --- LEARNING RATE & OPTIMIZER ---
+  # Usiamo 2e-4. I pesi delle classi (che possono arrivare a 10.0x per le classi rare)
+  # moltiplicano i gradienti. Se LR è troppo alto (3e-4 o 5e-4), esplode tutto.
+  learning_rate: 0.0002
+  
+  # Warmup per non scioccare i pesi all'inizio
+  warmup_ratio: 0.1
+  
+  # Mixed Precision (Obbligatorio su T4)
+  fp16: true
+  
+  # Label Smoothing
+  # Aiuta molto quando una classe (Human) è 100x le altre.
+  # Impedisce al modello di dire "Sono sicuro al 100% che è Human".
+  label_smoothing: 0.1
+
+# ---------------------
+# Loss Weights Balancing
+# ---------------------
+# Questi parametri controllano l'architettura Multi-Head nel model.py
+loss_weights:
+  w_ce: 1.0     # Classificazione principale
+  w_supcon: 0.8 # Aumentato: Vogliamo forzare il grouping per famiglia (generalizzazione)
+  w_dann: 0.5   # Adversarial: Tienilo basso se il training è instabile
+
+# ---------------------
+# Debugging
+# ---------------------
+demo:
+  active: false
+  fraction: 0.1

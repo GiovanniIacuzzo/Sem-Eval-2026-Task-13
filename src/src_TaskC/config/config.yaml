@@ -1,0 +1,93 @@
+# ==========================================
+# SemEval 2026 Task 13 - Subtask C Config
+# Optimized for NVIDIA T4 (16GB VRAM)
+# Strategy: Boosted LoRA + DANN + SupCon (4-Class)
+# ==========================================
+
+# ---------------------
+# Dataset Configuration
+# ---------------------
+data:
+  # CAMBIO CHIAVE: Puntiamo alla cartella del Task C
+  train_path: "data/Task_C/train.parquet"
+  val_path: "data/Task_C/validation.parquet"
+  
+  # La lunghezza massima resta 512, ottimale per UniXCoder/CodeBERT.
+  max_length: 512
+  
+  # Bilanciamento (Mantenuto)
+  balance_languages: True
+  # Manteniamo il downsampling aggressivo (6000) per evitare la dominanza di Python.
+  samples_per_lang: 6000 
+
+# ---------------------
+# Model Architecture
+# ---------------------
+model:
+  # UniXCoder o CodeBERT restano ottime scelte per il codice.
+  model_name: "microsoft/unixcoder-base"
+  # CAMBIO CHIAVE: 4 classi (Human, AI, Hybrid, Adversarial)
+  num_labels: 4 
+  
+  # --- LoRA Optimization ---
+  use_lora: true 
+  
+  # Mantenuto extra_dropout per generalizzazione, utile contro i campioni Adversarial
+  extra_dropout: 0.15 
+  
+  # --- DANN Targets (Mantenuto per Domain Generalization) ---
+  # La DANN (Domain Adversarial) sulla lingua aiuta il modello a concentrarsi
+  # solo sulle impronte digitali dell'autore/modello, ignorando lo stile della lingua.
+  languages:
+    - python
+    - java
+    - c++
+    - c
+    - c#
+    - javascript
+    - typescript
+    - go
+    - php
+    - ruby
+    - rust
+    - kotlin
+    - swift
+    - shell
+
+# ---------------------
+# Training Hyperparameters
+# ---------------------
+training:
+  # CAMBIO CHIAVE: Nomi di directory aggiornati
+  output_dir: "./results_TaskC"
+  checkpoint_dir: "./results_TaskC/checkpoints"
+  log_dir: "./results_TaskC/logs"
+  
+  # Aumentiamo le epoche per la maggiore complessità del Task C (4 classi)
+  num_epochs: 20
+  early_stop_patience: 5
+  
+  # --- Memory Strategy T4 (Mantenuta) ---
+  # Batch 16 * 4 accumulo = 64 Effettivo. Cruciale per AMP + T4.
+  batch_size: 16
+  gradient_accumulation_steps: 4
+  
+  # --- Learning Rate ---
+  learning_rate: 0.0003
+  
+  # CAMBIO CHIAVE: La metrica di valutazione è F1 Macro (già implementata nel codice)
+  evaluation_metric: "f1" 
+  best_metric_lower_is_better: false
+  
+  warmup_ratio: 0.1
+  fp16: true
+  
+  # Manteniamo Label smoothing: essenziale per le classi "ibride" e "avversarie"
+  label_smoothing: 0.05
+
+# ---------------------
+# Demo Mode
+# ---------------------
+demo:
+  active: false 
+  fraction: 0.05
