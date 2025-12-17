@@ -32,8 +32,8 @@ Per affrontare la natura eterogenea di questo task, lo script `info_dataset_subT
 A differenza dei task precedenti, qui potremmo osservare distribuzioni continue (score di regressione) o classi ibride. Questo grafico è cruciale per scegliere la Loss Function (CrossEntropy vs MSE).
 
 <div style="text-align:center">
-  <img src="img_TaskC/Train_target_dist.png" width="45%" alt="Train Target Distribution"/>
-  <img src="img_TaskC/Validation_target_dist.png" width="45%" alt="Validation Target Distribution"/>
+  <img src="../img/img_TaskC/Train_target_dist.png" width="45%" alt="Train Target Distribution"/>
+  <img src="../img/img_TaskC/Validation_target_dist.png" width="45%" alt="Validation Target Distribution"/>
 </div>
 
 <br>
@@ -42,8 +42,8 @@ A differenza dei task precedenti, qui potremmo osservare distribuzioni continue 
 Analisi della lunghezza degli snippet (senza outlier estremi). In task di "Mixed-Source", la lunghezza può correlare con la probabilità di intervento dell'AI (le AI tendono a refactorizzare in modo conciso o verboso a seconda del prompt).
 
 <div style="text-align:center">
-  <img src="img_TaskC/Train_length_dist.png" width="45%" alt="Train Length Distribution"/>
-  <img src="img_TaskC/Validation_length_dist.png" width="45%" alt="Validation Length Distribution"/>
+  <img src="../img/img_TaskC/Train_length_dist.png" width="45%" alt="Train Length Distribution"/>
+  <img src="../img/img_TaskC/Validation_length_dist.png" width="45%" alt="Validation Length Distribution"/>
 </div>
 
 <br>
@@ -52,8 +52,8 @@ Analisi della lunghezza degli snippet (senza outlier estremi). In task di "Mixed
 Panoramica dei linguaggi coinvolti nel task di modifica/generazione ibrida.
 
 <div style="text-align:center">
-  <img src="img_TaskC/Train_languages.png" width="45%" alt="Train Languages"/>
-  <img src="img_TaskC/Validation_languages.png" width="45%" alt="Validation Languages"/>
+  <img src="../img/img_TaskC/Train_languages.png" width="45%" alt="Train Languages"/>
+  <img src="../img/img_TaskC/Validation_languages.png" width="45%" alt="Validation Languages"/>
 </div>
 
 Queste informazioni aiutano a definire:
