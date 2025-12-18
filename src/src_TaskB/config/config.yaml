@@ -4,6 +4,42 @@
 # Strategy: 11-Family Classification + DANN + SupCon + Weighted Loss
 # ==========================================
 
+# Configurazione Comune
+common:
+  data_dir: "data/Task_B_Processed"
+  val_path: "data/Task_B/validation.parquet" # Usiamo lo stesso validation set originale
+  max_length: 512
+  
+  # Training params comuni
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.1
+  fp16: true
+  
+  # Logging
+  checkpoint_dir: "results/results_TaskB/checkpoints"
+  log_dir: "results/results_TaskB/logs"
+
+# Configurazione Modalità BINARY (Human vs AI)
+binary:
+  model_name: "microsoft/codebert-base" # Modello leggero è sufficiente
+  train_file: "train_binary.parquet"
+  num_labels: 2
+  num_epochs: 3 # Bastano poche epoche, il task è facile
+  class_weights: false # Il dataset è bilanciato artificialmente, non servono pesi
+
+# Configurazione Modalità FAMILIES (AI Classification)
+families:
+  model_name: "microsoft/unixcoder-base" # Modello più potente
+  train_file: "train_families.parquet"
+  num_labels: 10 # Le 10 famiglie AI (0-9 internamente)
+  num_epochs: 10
+  class_weights: true # Qui servono perché alcune AI sono rare
+  use_lora: true
+  lora_r: 64
+  languages: ["python", "java", "cpp", "c", "cs", "javascript", "php", "ruby", "rust", "go"]
+
 # ---------------------
 # Dataset Configuration
 # ---------------------
@@ -68,10 +104,10 @@ model:
 # Training Hyperparameters
 # ---------------------
 training:
-  output_dir: "results_TaskB"
-  checkpoint_dir: "./results_TaskB/checkpoints"
-  log_dir: "./results_TaskB/logs"
-  
+  output_dir: "results/results_TaskB"
+  checkpoint_dir: "results/results_TaskB/checkpoints"
+  log_dir: "results/results_TaskB/logs"
+
   # --- STRATEGIA DI TEMPISTICHE ---
   # 15 Epoche sono sufficienti grazie ai Class Weights.
   # Se andiamo oltre, rischiamo overfitting sulla classe "Human" nonostante i pesi.

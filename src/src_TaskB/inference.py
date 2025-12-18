@@ -12,9 +12,9 @@ from torch.amp import autocast
 from dotenv import load_dotenv
 
 # Local imports
-from src_TaskB.models.model import CodeClassifier
+from src.src_TaskB.models.model import CodeClassifier
 # Importiamo FAMILY_MAP invece di GENERATOR_MAP
-from src_TaskB.dataset.dataset import CodeDataset, load_base_dataframe, FAMILY_MAP
+from src.src_TaskB.dataset.dataset import CodeDataset, load_base_dataframe, FAMILY_MAP
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
 logger = logging.getLogger(__name__)

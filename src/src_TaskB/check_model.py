@@ -1,5 +1,5 @@
 import torch
-from src_TaskB.models.model import CodeClassifier
+from src.src_TaskB.models.model import CodeClassifier
 
 # Config Finta
 config = {

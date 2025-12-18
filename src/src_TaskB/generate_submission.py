@@ -8,8 +8,8 @@ from torch.utils.data import DataLoader
 from torch.amp import autocast
 from dotenv import load_dotenv
 
-from src_TaskB.models.model import CodeClassifier
-from src_TaskB.dataset.Inference_dataset import InferenceDataset
+from src.src_TaskB.models.model import CodeClassifier
+from src.src_TaskB.dataset.Inference_dataset import InferenceDataset
 
 # -----------------------------------------------------------------------------
 # 2. Pipeline di Sottomissione
