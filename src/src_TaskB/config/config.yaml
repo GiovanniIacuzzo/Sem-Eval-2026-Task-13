@@ -1,158 +1,91 @@
-# ==========================================
-# SemEval 2026 Task 13 - Subtask B Config
+# =============================================================================
+# SemEval 2026 Task 13 - Subtask B Configuration
 # Optimized for NVIDIA T4 (16GB VRAM)
-# Strategy: 11-Family Classification + DANN + SupCon + Weighted Loss
-# ==========================================
+# Strategy: Cascade (Binary Gatekeeper -> 10-Class Specialist)
+# =============================================================================
 
-# Configurazione Comune
+# -----------------------------------------------------------------------------
+# COMMON CONFIGURATION (Base params, overwritten by specific modes)
+# -----------------------------------------------------------------------------
 common:
-  data_dir: "data/Task_B_Processed"
-  val_path: "data/Task_B/validation.parquet" # Usiamo lo stesso validation set originale
-  max_length: 512
-  
-  # Training params comuni
-  batch_size: 16
-  gradient_accumulation_steps: 2
-  learning_rate: 2.0e-5
-  warmup_ratio: 0.1
-  fp16: true
-  
-  # Logging
-  checkpoint_dir: "results/results_TaskB/checkpoints"
-  log_dir: "results/results_TaskB/logs"
-
-# Configurazione Modalità BINARY (Human vs AI)
-binary:
-  model_name: "microsoft/codebert-base" # Modello leggero è sufficiente
-  train_file: "train_binary.parquet"
-  num_labels: 2
-  num_epochs: 3 # Bastano poche epoche, il task è facile
-  class_weights: false # Il dataset è bilanciato artificialmente, non servono pesi
-
-# Configurazione Modalità FAMILIES (AI Classification)
-families:
-  model_name: "microsoft/unixcoder-base" # Modello più potente
-  train_file: "train_families.parquet"
-  num_labels: 10 # Le 10 famiglie AI (0-9 internamente)
-  num_epochs: 10
-  class_weights: true # Qui servono perché alcune AI sono rare
-  use_lora: true
-  lora_r: 64
-  languages: ["python", "java", "cpp", "c", "cs", "javascript", "php", "ruby", "rust", "go"]
-
-# ---------------------
-# Dataset Configuration
-# ---------------------
-data:
-  train_path: "data/Task_B/train.parquet"
-  val_path: "data/Task_B/validation.parquet"
-  
-  # Context Length
-  # 512 è il sweet spot. Oltre (1024) su T4 rischiamo OOM o batch size = 1.
-  max_length: 512
-  
-  # Task Definition
-  task_type: "multiclass"
-  
-  # Augmentation
-  # Poiché le classi AI sono piccole (4k sample), l'augmentation nel codice
-  # (structural noise) è fondamentale. Qui controlliamo solo se attivarla.
-  augment_minority: True
-
-# ---------------------
-# Model Architecture
-# ---------------------
-model:
-  # UniXCoder è eccellente, ma se vuoi variare, 'microsoft/codebert-base' 
-  # è spesso più stabile per classificazione pura.
-  model_name: "microsoft/unixcoder-base"
-  
-  # --- CRITICAL UPDATE: 11 FAMIGLIE ---
-  # 0: Human
-  # 1-10: AI Families (01-ai, BigCode, DeepSeek, Gemma, Phi, Llama, Granite, Mistral, Qwen, OpenAI)
-  num_labels: 11
-  
-  # --- LORA CONFIGURATION (Power Up) ---
-  use_lora: true
-  
-  # Aumentiamo il Rank (r) da 32 a 64.
-  # Motivo: Distinguere Llama 3 da Mistral 7B è molto sottile.
-  # Serve più "capacità" trainable rispetto al task Human vs AI.
-  lora_r: 64
-  lora_alpha: 128
-  lora_dropout: 0.05 # Ridotto per non perdere info su classi rare
-  
-  # --- DANN TARGETS ---
-  # Linguaggi su cui vogliamo essere invarianti.
-  languages:
-    - python
-    - java
-    - c++
-    - c
-    - c#
-    - javascript
-    - typescript
-    - go
-    - php
-    - ruby
-    - rust
-    - kotlin
-    - swift
-    - shell
-
-# ---------------------
-# Training Hyperparameters
-# ---------------------
-training:
+  # Paths
+  data_dir: "data/Task_B_Processed" # Dove prepare_datasets.py ha salvato i parquet
   output_dir: "results/results_TaskB"
   checkpoint_dir: "results/results_TaskB/checkpoints"
   log_dir: "results/results_TaskB/logs"
+  
+  # Hardware & Training Defaults
+  seed: 42
+  fp16: true
+  num_workers: 4
+  
+  # Default Hyperparams
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  
+  # Default DANN Languages
+  languages: ["python", "java", "cpp", "c", "cs", "javascript", "php", "ruby", "rust", "go", "typescript", "kotlin", "swift", "shell"]
 
-  # --- STRATEGIA DI TEMPISTICHE ---
-  # 15 Epoche sono sufficienti grazie ai Class Weights.
-  # Se andiamo oltre, rischiamo overfitting sulla classe "Human" nonostante i pesi.
+# -----------------------------------------------------------------------------
+# MODE 1: BINARY (Gatekeeper)
+# Task: Human (0) vs AI (1)
+# -----------------------------------------------------------------------------
+binary:
+  # Model
+  model_name: "microsoft/codebert-base" # Leggero e veloce
+  num_labels: 2   # 0=Human, 1=AI
+  use_lora: false # CodeBERT full finetuning è gestibile su T4
+  
+  # Data
+  max_length: 512 # Qui 512 va bene, il modello è più piccolo
+  batch_size: 16
+  gradient_accumulation_steps: 2 # Effettivo 32
+  
+  # Training
+  num_epochs: 4 # Task facile, converge presto
+  early_stop_patience: 2
+  class_weights: false # Dataset bilanciato in prepare_datasets
+  
+  # Loss Strategy
+  loss_weights:
+    w_ce: 1.0
+    w_supcon: 0.1 # Poco utile qui
+    w_dann: 0.2   # Leggero aiuto per invarianza al linguaggio
+
+# -----------------------------------------------------------------------------
+# MODE 2: FAMILIES (Specialist)
+# Task: Classify specific AI model (0-9)
+# -----------------------------------------------------------------------------
+families:
+  # Model
+  model_name: "microsoft/unixcoder-base" # Più potente per capire la struttura
+  num_labels: 10 # LE 10 FAMIGLIE AI. (Human è escluso)
+  
+  # LoRA (Heavy Duty)
+  use_lora: true
+  lora_r: 64      # Alto rank per catturare sfumature sottili
+  lora_alpha: 128
+  lora_dropout: 0.05
+  target_modules: ["query", "value", "key", "dense"]
+  
+  # Data (T4 Optimization)
+  # Abbassiamo a 384 per alzare il Batch Size fisico.
+  # SupCon ha bisogno di tanti esempi per batch per funzionare bene!
+  max_length: 384 
+  batch_size: 24   # Su T4 dovresti riuscire a fare 24 o 32 con LoRA
+  gradient_accumulation_steps: 1 # Accumulo meno importante del batch fisico qui
+  
+  # Training
   num_epochs: 15
   early_stop_patience: 4
+  class_weights: true # CRUCIALE: Bilancia le classi rare (es. Granite)
+  learning_rate: 3.0e-4 # LoRA vuole un LR più alto del full finetuning
   
-  # --- MEMORY & BATCH TUNING (SupCon Strategy) ---
-  # La SupCon Loss FUNZIONA SOLO se nel batch ci sono esempi della stessa classe.
-  # Con batch piccolo (8/16), le classi rare potrebbero apparire da sole -> Loss = 0.
-  # Dobbiamo massimizzare la batch size.
-  
-  batch_size: 16  # Massimo fisico su T4 con fp16 e context 512
-  
-  # Accumuliamo per simulare una batch size di 64.
-  # 16 * 4 = 64. Questo stabilizza la SupCon Loss.
-  gradient_accumulation_steps: 4
-  
-  # --- LEARNING RATE & OPTIMIZER ---
-  # Usiamo 2e-4. I pesi delle classi (che possono arrivare a 10.0x per le classi rare)
-  # moltiplicano i gradienti. Se LR è troppo alto (3e-4 o 5e-4), esplode tutto.
-  learning_rate: 0.0002
-  
-  # Warmup per non scioccare i pesi all'inizio
-  warmup_ratio: 0.1
-  
-  # Mixed Precision (Obbligatorio su T4)
-  fp16: true
-  
-  # Label Smoothing
-  # Aiuta molto quando una classe (Human) è 100x le altre.
-  # Impedisce al modello di dire "Sono sicuro al 100% che è Human".
-  label_smoothing: 0.1
-
-# ---------------------
-# Loss Weights Balancing
-# ---------------------
-# Questi parametri controllano l'architettura Multi-Head nel model.py
-loss_weights:
-  w_ce: 1.0     # Classificazione principale
-  w_supcon: 0.8 # Aumentato: Vogliamo forzare il grouping per famiglia (generalizzazione)
-  w_dann: 0.5   # Adversarial: Tienilo basso se il training è instabile
-
-# ---------------------
-# Debugging
-# ---------------------
-demo:
-  active: false
-  fraction: 0.1
+  # Loss Strategy
+  loss_weights:
+    w_ce: 1.0
+    w_supcon: 0.8 # ALTO: Forza il clustering delle famiglie
+    w_dann: 0.5   # MEDIO: Rendi il modello cieco al linguaggio (Java/Python)
