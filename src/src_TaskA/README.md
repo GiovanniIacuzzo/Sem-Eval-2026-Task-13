@@ -35,21 +35,21 @@ Per comprendere meglio i dati a disposizione, è stato creato uno script `info_d
 Distribuzione e statistiche dei dataset Train, Validation e Test:
 
 <div style="text-align:center">
-  <img src="../img/img_TaskA/Train_length_label.png" width="30%" />
-  <img src="../img/img_TaskA/Validation_length_label.png" width="30%" />
-  <img src="../img/img_TaskA/Test_length_label.png" width="30%" />
+  <img src="../../img/img_TaskA/Train_length_label.png" width="30%" />
+  <img src="../../img/img_TaskA/Validation_length_label.png" width="30%" />
+  <img src="../../img/img_TaskA/Test_length_label.png" width="30%" />
 </div>
 
 <div style="text-align:center">
-  <img src="../img/img_TaskA/Train_label_language.png" width="30%" />
-  <img src="../img/img_TaskA/Validation_label_language.png" width="30%" />
-  <img src="../img/img_TaskA/Test_label_language.png" width="30%" />
+  <img src="../../img/img_TaskA/Train_label_language.png" width="30%" />
+  <img src="../../img/img_TaskA/Validation_label_language.png" width="30%" />
+  <img src="../../img/img_TaskA/Test_label_language.png" width="30%" />
 </div>
 
 <div style="text-align:center">
-  <img src="../img/img_TaskA/Train_top_generators.png" width="30%" />
-  <img src="../img/img_TaskA/Validation_top_generators.png" width="30%" />
-  <img src="../img/img_TaskA/Test_top_generators.png" width="30%" />
+  <img src="../../img/img_TaskA/Train_top_generators.png" width="30%" />
+  <img src="../../img/img_TaskA/Validation_top_generators.png" width="30%" />
+  <img src="../../img/img_TaskA/Test_top_generators.png" width="30%" />
 </div>
 
 Queste informazioni aiutano a capire:

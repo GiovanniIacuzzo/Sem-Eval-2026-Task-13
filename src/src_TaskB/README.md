@@ -35,8 +35,8 @@ Per analizzare la complessità del task multiclasse, è stato sviluppato lo scri
 Evidenzia il forte sbilanciamento verso la classe *Human* e le differenze di frequenza tra i vari modelli AI.
 
 <div style="text-align:center">
-  <img src="../img/img_TaskB/Train_class_dist.png" width="45%" alt="Train Class Distribution"/>
-  <img src="../img/img_TaskB/Validation_class_dist.png" width="45%" alt="Validation Class Distribution"/>
+  <img src="../../img/img_TaskB/Train_class_dist.png" width="45%" alt="Train Class Distribution"/>
+  <img src="../../img/img_TaskB/Validation_class_dist.png" width="45%" alt="Validation Class Distribution"/>
 </div>
 
 <br>
@@ -45,8 +45,8 @@ Evidenzia il forte sbilanciamento verso la classe *Human* e le differenze di fre
 Confronto della lunghezza media dei codici prodotti. I Boxplot (ordinati per mediana) mostrano come alcuni modelli (es. GPT-4o) tendano a essere più "prolissi" di altri.
 
 <div style="text-align:center">
-  <img src="../img/img_TaskB/Train_token_boxplot.png" width="45%" alt="Train Token Boxplot"/>
-  <img src="../img/img_TaskB/Validation_token_boxplot.png" width="45%" alt="Validation Token Boxplot"/>
+  <img src="../../img/img_TaskB/Train_token_boxplot.png" width="45%" alt="Train Token Boxplot"/>
+  <img src="../../img/img_TaskB/Validation_token_boxplot.png" width="45%" alt="Validation Token Boxplot"/>
 </div>
 
 <br>
@@ -55,8 +55,8 @@ Confronto della lunghezza media dei codici prodotti. I Boxplot (ordinati per med
 Mostra la probabilità condizionata che un certo generatore produca codice in un determinato linguaggio. Utile per identificare modelli specializzati (es. solo Python) rispetto a quelli generalisti.
 
 <div style="text-align:center">
-  <img src="../img/img_TaskB/Train_heatmap_norm.png" width="45%" alt="Train Heatmap"/>
-  <img src="../img/img_TaskB/Validation_heatmap_norm.png" width="45%" alt="Validation Heatmap"/>
+  <img src="../../img/img_TaskB/Train_heatmap_norm.png" width="45%" alt="Train Heatmap"/>
+  <img src="../../img/img_TaskB/Validation_heatmap_norm.png" width="45%" alt="Validation Heatmap"/>
 </div>
 
 Queste informazioni aiutano a capire:
