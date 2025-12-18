@@ -1,8 +1,9 @@
 name: semeval
 channels:
-  - defaults
-  - conda-forge
   - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
 dependencies:
   - python=3.10
   - pip
@@ -12,14 +13,22 @@ dependencies:
   - matplotlib
   - seaborn
   - tqdm
+  - pyyaml  
   - pytorch
   - torchvision
   - torchaudio
+  - pytorch-cuda=12.1
   - pip:
       - transformers>=4.40.0
-      - datasets>=2.18.0
-      - evaluate
-      - sentencepiece
-      - accelerate
-      - huggingface_hub
+      - accelerate>=0.29.0
       - tokenizers
+      - sentencepiece
+      - datasets
+      - safetensors
+      - comet_ml
+      - python-dotenv
+      - peft
+      - pytorch-metric-learning
+      - bitsandbytes
+      - protobuf
+      - scikit-learn
