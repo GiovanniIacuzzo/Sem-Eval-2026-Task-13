@@ -24,9 +24,8 @@ if not logger.handlers:
 # -----------------------------------------------------------------------------
 class CodeDataset(Dataset):
     """
-    Optimized PyTorch Dataset per Task C.
-    Mantiene il rumore strutturale (spazi/newlines) ma RIMUOVE il masking dei token
-    per preservare gli artefatti sintattici specifici delle AI.
+    Dataset ottimizzato per Task C.
+    Supporta augmentation strutturale (spazi/newlines) per il training.
     """
     def __init__(self, 
                  dataframe: pd.DataFrame, 
@@ -47,25 +46,15 @@ class CodeDataset(Dataset):
     def _structural_noise(self, code: str) -> str:
         """
         Simula variazioni di stile umano (spaziature, righe vuote)
-        senza distruggere la sintassi del codice.
+        senza distruggere la sintassi.
         """
         lines = code.split('\n')
         new_lines = []
         for line in lines:
-            # Aggiunge righe vuote casuali
-            if random.random() < 0.05:
-                new_lines.append("")
-            
-            # Aggiunge spazi casuali a fine riga (trailing spaces)
-            if random.random() < 0.05:
-                line = line + " " * random.randint(1, 3)
-            
-            # Aggiunge un rientro errato occasionale
-            if random.random() < 0.01:
-                line = " " + line
-
+            if random.random() < 0.05: new_lines.append("") # Empty line
+            if random.random() < 0.05: line = line + " " * random.randint(1, 3) # Trailing space
+            if random.random() < 0.01: line = " " + line # Bad indent
             new_lines.append(line)
-        
         return "\n".join(new_lines)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -74,21 +63,20 @@ class CodeDataset(Dataset):
         label = int(row["label"]) 
         lang_str = str(row["language"]).lower()
         
+        # Gestione robusta per lingue sconosciute (-1 sarà ignorato dalla Loss DANN)
         lang_id = self.language_map.get(lang_str, -1)
         
-        # 1. Augmentation Strutturale (Safe)
+        # 1. Augmentation (SOLO se augment=True, gestito dal main loop)
         if self.augment:
             code = self._structural_noise(code)
+            # Random Crop se troppo lungo
+            if len(code) > self.max_length * 4:
+                max_start = len(code) - int(self.max_length * 3.5)
+                if max_start > 0:
+                    start = random.randint(0, max_start)
+                    code = code[start : start + int(self.max_length * 4)]
 
-        # 2. Random Cropping (Se il codice è lunghissimo)
-        # Prende una finestra casuale invece di troncare sempre la fine
-        if self.augment and len(code) > self.max_length * 4:
-            max_start = len(code) - int(self.max_length * 3.5)
-            if max_start > 0:
-                start_idx = random.randint(0, max_start)
-                code = code[start_idx : start_idx + int(self.max_length * 4)]
-
-        # 3. Tokenization standard
+        # 2. Tokenization
         encoding = self.tokenizer(
             code,
             truncation=True,
@@ -100,10 +88,6 @@ class CodeDataset(Dataset):
         input_ids = encoding["input_ids"].squeeze(0)
         attention_mask = encoding["attention_mask"].squeeze(0)
 
-        # --- RIMOSSO IL MASKING MLM ---
-        # Il masking casuale (BERT style) danneggia la capacità del modello
-        # di rilevare pattern sottili generati dalle LLM.
-
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -112,7 +96,7 @@ class CodeDataset(Dataset):
         }
 
 # -----------------------------------------------------------------------------
-# Data Processing Helpers
+# Data Helpers
 # -----------------------------------------------------------------------------
 def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataFrame:
     columns = ['code', 'label', 'language'] 
@@ -127,17 +111,13 @@ def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataF
         
     df['language'] = df['language'].str.lower()
     df = df.dropna(subset=['code']).reset_index(drop=True)
-    # Filtro codici troppo brevi (spesso rumore)
-    df = df[df['code'].str.len() > 15].copy() 
+    df = df[df['code'].str.len() > 15].copy() # Filtro rumore minimo
     df['code'] = df['code'].str.slice(0, max_code_chars)
     return df
 
 def balance_languages(df: pd.DataFrame, target_samples: int = 3000) -> pd.DataFrame:
-    """
-    Limita il numero massimo di sample per linguaggio per evitare che
-    linguaggi popolari (Python/Java) dominino il training.
-    """
-    logger.info(f"Balancing languages... Max cap per lang: {target_samples}")
+    """Cap a sample per language to avoid Python dominance."""
+    logger.info(f"Balancing languages... Max cap: {target_samples}")
     df_list = []
     for lang, count in df['language'].value_counts().items():
         group = df[df['language'] == lang]
@@ -145,57 +125,64 @@ def balance_languages(df: pd.DataFrame, target_samples: int = 3000) -> pd.DataFr
             df_list.append(group.sample(n=target_samples, random_state=42))
         else:
             df_list.append(group)
-    
-    balanced_df = pd.concat(df_list).sample(frac=1, random_state=42).reset_index(drop=True)
-    return balanced_df
+    return pd.concat(df_list).sample(frac=1, random_state=42).reset_index(drop=True)
 
 def get_class_weights(df: pd.DataFrame, device: torch.device) -> torch.Tensor:
-    """
-    Calcola i pesi inversi per bilanciare la Loss Function.
-    Cruciale per Task C dove Hybrid e Adversarial sono rari.
-    """
+    """Inverse frequency weights for Focal Loss."""
     labels = df['label'].values
     classes = np.unique(labels)
-    
-    # 'balanced': n_samples / (n_classes * np.bincount(y))
     weights = compute_class_weight(class_weight='balanced', classes=classes, y=labels)
-    
-    # Conversione in tensore
-    weight_tensor = torch.tensor(weights, dtype=torch.float32).to(device)
-    logger.info(f"Computed Class Weights: {weight_tensor}")
-    return weight_tensor
+    return torch.tensor(weights, dtype=torch.float32).to(device)
+
+def get_dynamic_language_map(df: pd.DataFrame) -> Dict[str, int]:
+    """Crea la mappa lingue basata sui dati reali presenti."""
+    unique_langs = sorted(df['language'].unique())
+    lang_map = {lang: i for i, lang in enumerate(unique_langs)}
+    logger.info(f"Dynamic DANN Language Map ({len(lang_map)}): {lang_map}")
+    return lang_map
 
 # -----------------------------------------------------------------------------
-# Main Data Loading Interface
+# NEW: K-Fold Hook
 # -----------------------------------------------------------------------------
-def load_data(config: dict, tokenizer, device=torch.device("cpu")) -> Tuple[CodeDataset, CodeDataset, torch.Tensor]:
-    logger.info(">>> Loading Data for Task C (Multiclass) <<<")
+def load_data_for_kfold(config: dict) -> pd.DataFrame:
+    """
+    Carica e unisce Train+Val in un unico DataFrame pulito.
+    NON crea ancora i dataset PyTorch (quello lo farà il main loop).
+    """
+    logger.info(">>> Loading Raw Data for K-Fold Merge <<<")
     
     train_path = config["data"]["train_path"]
     val_path = config["data"]["val_path"]
     
-    train_df = load_and_preprocess(train_path)
-    val_df   = load_and_preprocess(val_path)
+    df_train = load_and_preprocess(train_path)
+    df_val = load_and_preprocess(val_path)
     
-    # 1. Bilanciamento per Linguaggio (evita overfitting su Python)
+    # Unione completa
+    full_df = pd.concat([df_train, df_val]).reset_index(drop=True)
+    
+    # Bilanciamento Globale
     samples_cap = config["data"].get("samples_per_lang", 4000)
     if config["data"].get("balance_languages", True):
-        train_df = balance_languages(train_df, target_samples=samples_cap)
-    
-    # 2. Calcolo dei pesi per la Loss Function (gestisce sbilanciamento label)
-    class_weights = get_class_weights(train_df, device)
-    
-    # DANN Mapping
-    target_langs = config["model"].get("languages", ["python", "java", "cpp"])
-    language_map = {lang.lower(): i for i, lang in enumerate(target_langs)}
-    
-    max_len = config["data"].get("max_length", 512)
-    
-    train_dataset = CodeDataset(train_df, tokenizer, language_map, max_length=max_len, augment=True)
-    val_dataset = CodeDataset(val_df, tokenizer, language_map, max_length=max_len, augment=False)
+        full_df = balance_languages(full_df, target_samples=samples_cap)
+        
+    logger.info(f"Total Merged Data: {len(full_df)} samples")
+    return full_df
 
-    logger.info(f"Dataset Stats: Train: {len(train_dataset)} | Val: {len(val_dataset)}")
-    logger.info(f"Train Label Distribution:\n{train_df['label'].value_counts().sort_index()}")
+# -----------------------------------------------------------------------------
+# Legacy Loader (Optional, for quick checks without K-Fold)
+# -----------------------------------------------------------------------------
+def load_data(config: dict, tokenizer, device=torch.device("cpu")):
+    # Usa la logica unificata anche qui
+    full_df = load_data_for_kfold(config)
+    lang_map = get_dynamic_language_map(full_df)
+    weights = get_class_weights(full_df, device)
     
-    # Restituiamo i dataset E i pesi per la loss
-    return train_dataset, val_dataset, class_weights
+    # Split manuale 80/20 se si usa questa funzione legacy
+    mask = np.random.rand(len(full_df)) < 0.8
+    train_df = full_df[mask]
+    val_df = full_df[~mask]
+    
+    train_ds = CodeDataset(train_df, tokenizer, lang_map, config["data"]["max_length"], augment=True)
+    val_ds = CodeDataset(val_df, tokenizer, lang_map, config["data"]["max_length"], augment=False)
+    
+    return train_ds, val_ds, weights

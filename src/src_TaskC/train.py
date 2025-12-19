@@ -8,13 +8,14 @@ import zipfile
 import shutil
 import argparse
 import gc
-from torch.utils.data import DataLoader, Subset
+import pandas as pd
+from torch.utils.data import DataLoader
 from torch.amp import autocast
 from torch.cuda.amp import GradScaler
 from tqdm import tqdm
 from dotenv import load_dotenv
-from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import StratifiedKFold
+from transformers import AutoTokenizer
 from comet_ml import Experiment
 
 try:
@@ -24,9 +25,10 @@ except ImportError:
     KAGGLE_AVAILABLE = False
     print("Warning: 'kaggle' library not found. Auto-download disabled.")
 
-# --- IMPORTS AGGIORNATI ---
+# --- IMPORTS AGGIORNATI (Assicurati che dataset.py sia aggiornato) ---
 from src_TaskC.models.model import CodeClassifier
-from src_TaskC.dataset.dataset import load_data
+# Importiamo le classi specifiche per gestire la creazione dinamica dei dataset
+from src_TaskC.dataset.dataset import CodeDataset, load_data_for_kfold, get_dynamic_language_map, get_class_weights
 from src_TaskC.utils.utils import evaluate
 
 # -----------------------------------------------------------------------------
@@ -49,12 +51,11 @@ class ConsoleUX:
 
     @staticmethod
     def log_metrics(stage, metrics):
-        # Ordina le chiavi per avere f1 globale prima delle classi
         keys = sorted(metrics.keys(), key=lambda x: (0 if x == 'f1' else 1, x))
         log_str = f"[{stage}] "
         for k in keys:
             v = metrics[k]
-            if "class" in k: # Accorcia i log per le classi
+            if "class" in k: 
                 log_str += f"{k.replace('f1_class_', 'C')}: {v:.3f} | "
             elif isinstance(v, float):
                 log_str += f"{k}: {v:.4f} | "
@@ -116,7 +117,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         labels = batch["labels"].to(device, non_blocking=True)
         lang_ids = batch["lang_ids"].to(device, non_blocking=True)
         
-        # Annealing per DANN (Gradient Reversal)
+        # Annealing per DANN
         current_step = step + epoch_idx * len_dataloader
         total_steps = total_epochs * len_dataloader
         p = float(current_step) / total_steps
@@ -153,20 +154,18 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         predictions.extend(preds)
         references.extend(labels_cpu)
         
-        # Memory cleanup
         del input_ids, attention_mask, labels, lang_ids, logits, loss
     
-    # Compute metrics at end of epoch
     metrics = model.compute_metrics(predictions, references)
     metrics["loss"] = running_loss / len_dataloader
     return metrics
 
 # -----------------------------------------------------------------------------
-# Main Execution (K-FOLD ENABLED)
+# Main Execution (K-FOLD LEAKAGE FREE)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
-    ConsoleUX.print_banner("SemEval 2026 Task 13 - Subtask C (K-Fold Optimized)")
+    ConsoleUX.print_banner("SemEval 2026 Task 13 - Subtask C (K-Fold Leakage-Free)")
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="src_TaskC/config/config.yaml") 
@@ -190,28 +189,28 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
-    # 1. Caricamento Dati Completo (Uniamo train e val per la Cross Validation)
-    # Passiamo 'device' per calcolare i pesi direttamente su GPU/CPU
-    # NOTA: Usiamo il modello temporaneo solo per il tokenizer
-    temp_tokenizer = CodeClassifier(config).tokenizer 
-    full_train_dataset, full_val_dataset, class_weights = load_data(config, temp_tokenizer, device)
+    # =========================================================================
+    # 1. SETUP DATA (PANDAS ONLY)
+    # =========================================================================
+    # Carichiamo il DataFrame completo SENZA creare ancora i Dataset PyTorch
+    full_df = load_data_for_kfold(config)
+    
+    # Generiamo la mappa lingue dinamica per evitare crash della DANN
+    language_map = get_dynamic_language_map(full_df)
+    config["model"]["num_languages"] = len(language_map) # Aggiorna config
+    
+    # Carichiamo il tokenizer in modo ottimizzato (senza caricare tutto il modello)
+    model_name = config["model"]["model_name"]
+    logger.info(f"Loading Tokenizer: {model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # Uniamo i dataset per K-Fold
-    full_dataset = torch.utils.data.ConcatDataset([full_train_dataset, full_val_dataset])
-    # Estraiamo le labels per StratifiedKFold
-    all_labels = []
-    # Attenzione: Iterare su ConcatDataset è lento, estraiamo labels dal dataframe originale
-    # Assumiamo che load_data restituisca anche i df o che li possiamo ricavare.
-    # Per semplicità qui usiamo gli indici, ma in produzione meglio passare y a KFold.
-    # Recuperiamo y dal dataframe interno dei dataset
-    y_train = full_train_dataset.data['label'].values
-    y_val = full_val_dataset.data['label'].values
-    y_all = np.concatenate([y_train, y_val])
-
-    # K-Fold Setup
+    # Prepariamo Labels per StratifiedKFold
+    y_all = full_df['label'].values
+    
+    # Setup K-Fold
     kf = StratifiedKFold(n_splits=args.k_folds, shuffle=True, random_state=42)
     
-    # Init CometML Experiment (Global)
+    # Setup Comet
     experiment = Experiment(
         api_key=os.getenv("COMET_API_KEY"),
         project_name=os.getenv("COMET_PROJECT_NAME", "semeval-task13-subtaskc"),
@@ -220,30 +219,65 @@ if __name__ == "__main__":
     )
     experiment.log_parameters(config)
 
-    # -------------------------------------------------------------------------
-    # K-Fold Loop
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # 2. K-FOLD LOOP
+    # =========================================================================
     for fold, (train_idx, val_idx) in enumerate(kf.split(np.zeros(len(y_all)), y_all)):
         ConsoleUX.print_banner(f"FOLD {fold+1}/{args.k_folds}")
         
-        # Re-inizializza il modello per ogni fold
+        # A. Split Pandas DataFrame
+        train_df_fold = full_df.iloc[train_idx]
+        val_df_fold = full_df.iloc[val_idx]
+        
+        # B. Calcolo Pesi Solo sul Train Fold (No Leakage)
+        class_weights = get_class_weights(train_df_fold, device)
+        
+        # C. Creazione Dataset PyTorch (Augmentation differenziata)
+        # 
+        logger.info(f"Creating Datasets for Fold {fold+1}...")
+        train_dataset = CodeDataset(
+            dataframe=train_df_fold, 
+            tokenizer=tokenizer, 
+            language_map=language_map,
+            max_length=config["data"]["max_length"], 
+            augment=True  # Sì rumore per training
+        )
+        val_dataset = CodeDataset(
+            dataframe=val_df_fold, 
+            tokenizer=tokenizer, 
+            language_map=language_map,
+            max_length=config["data"]["max_length"], 
+            augment=False # Dati puliti per validazione
+        )
+        logger.info(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
+
+        # D. Inizializzazione Modello e Dataloaders
         model = CodeClassifier(config, class_weights=class_weights)
+        
+        # Ridimensionamento DANN Head se necessario
+        if model.num_languages != len(language_map):
+            logger.info(f"Adjusting DANN head to {len(language_map)} languages.")
+            import torch.nn as nn
+            model.language_classifier = nn.Sequential(
+                nn.Linear(model.hidden_size, model.hidden_size // 2),
+                nn.ReLU(),
+                nn.Linear(model.hidden_size // 2, len(language_map))
+            )
+            model._init_weights(model.language_classifier)
+            
         model.to(device)
         
-        train_sub = Subset(full_dataset, train_idx)
-        val_sub = Subset(full_dataset, val_idx)
-        
         num_workers = 4
-        train_dl = DataLoader(train_sub, batch_size=config["training"]["batch_size"], 
+        train_dl = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], 
                              shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True)
-        val_dl = DataLoader(val_sub, batch_size=config["training"]["batch_size"], 
+        val_dl = DataLoader(val_dataset, batch_size=config["training"]["batch_size"], 
                            shuffle=False, num_workers=num_workers, pin_memory=True)
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["training"]["learning_rate"]), weight_decay=0.01)
         scaler = GradScaler()
         
         acc_steps = config["training"].get("gradient_accumulation_steps", 1)
-        num_epochs = config["training"].get("num_epochs", 5) # Default 5 epoch per fold
+        num_epochs = config["training"].get("num_epochs", 5) 
         total_steps = len(train_dl) * num_epochs // acc_steps
         
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -257,18 +291,18 @@ if __name__ == "__main__":
         save_dir = config["training"]["checkpoint_dir"]
         os.makedirs(save_dir, exist_ok=True)
 
+        # E. Training Loop
         for epoch in range(num_epochs):
             train_metrics = train_one_epoch(
                 model, train_dl, optimizer, scheduler, scaler, device, 
                 epoch, num_epochs, acc_steps
             )
             
-            # Valutazione con Report Verbose all'ultima epoch o se migliora
+            # Valutazione
             val_metrics, val_preds, val_refs = evaluate(model, val_dl, device, verbose=False)
             
             ConsoleUX.log_metrics(f"F{fold+1}-Ep{epoch+1}", val_metrics)
             
-            # Logging to Comet (con prefisso fold)
             experiment.log_metrics(train_metrics, prefix=f"Fold{fold}_Train", step=epoch)
             experiment.log_metrics(val_metrics, prefix=f"Fold{fold}_Val", step=epoch)
 
@@ -277,7 +311,6 @@ if __name__ == "__main__":
                 best_fold_f1 = val_metrics["f1"]
                 patience_counter = 0
                 
-                # Salvataggio specifico per Fold
                 fold_save_dir = os.path.join(save_dir, f"fold_{fold}")
                 os.makedirs(fold_save_dir, exist_ok=True)
                 
@@ -293,8 +326,8 @@ if __name__ == "__main__":
                 logger.info(f"Early stopping fold {fold+1}")
                 break
 
-        # Cleanup tra i fold per liberare VRAM
-        del model, optimizer, scheduler, scaler, train_dl, val_dl
+        # Cleanup
+        del model, optimizer, scheduler, scaler, train_dl, val_dl, train_dataset, val_dataset
         torch.cuda.empty_cache()
         gc.collect()
 
