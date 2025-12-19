@@ -1,47 +1,61 @@
 import torch
 import numpy as np
 import gc
+import logging
 from typing import Dict, List, Tuple
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
 from torch.amp import autocast
 from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
+
 # -----------------------------------------------------------------------------
-# Metric Computation (ADATTATO PER TASK C)
+# Metric Computation (POTENZIATO PER TASK C)
 # -----------------------------------------------------------------------------
 def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
     """
-    Computes classification metrics for Multiclass Task (Human, AI, Hybrid, Adv).
-    Primary Metric: Macro F1-score.
+    Calcola metriche dettagliate. Fondamentale per vedere se il modello
+    sta imparando le classi rare (Hybrid/Adversarial).
     """
     preds = np.array(preds)
     labels = np.array(labels)
 
+    # 1. Metriche Globali
     accuracy = accuracy_score(labels, preds)
-    
-    # Macro F1 è la metrica ufficiale per il Task C
     precision, recall, f1, _ = precision_recall_fscore_support(
         labels, preds, average='macro', zero_division=0
     )
 
-    return {
+    metrics = {
         "accuracy": float(accuracy),
         "f1": float(f1),         
         "precision": float(precision),
         "recall": float(recall)
     }
 
+    # 2. Metriche Per-Classe (Cruciale per il debugging)
+    # average=None restituisce un array con i punteggi per ogni classe
+    _, _, f1_per_class, _ = precision_recall_fscore_support(
+        labels, preds, average=None, zero_division=0
+    )
+
+    # Assumiamo 4 classi: 0, 1, 2, 3
+    # Mappale mentalmente a: 0=Human, 1=AI, 2=Hybrid, 3=Adversarial (o come da tuo dataset)
+    for i, score in enumerate(f1_per_class):
+        metrics[f"f1_class_{i}"] = float(score)
+
+    return metrics
+
 # -----------------------------------------------------------------------------
-# Evaluation Loop (Nessun cambiamento necessario, mantiene alpha=0.0)
+# Evaluation Loop
 # -----------------------------------------------------------------------------
 def evaluate(
     model: torch.nn.Module, 
     dataloader: torch.utils.data.DataLoader, 
-    device: torch.device
+    device: torch.device,
+    verbose: bool = False # Opzione per stampare il report completo
 ) -> Tuple[Dict[str, float], List[int], List[int]]:
-    """
-    Runs evaluation loop. Sets alpha=0 to disable DANN during validation.
-    """
+    
     model.eval()
     running_loss = 0.0
     predictions = []
@@ -49,10 +63,11 @@ def evaluate(
 
     progress_bar = tqdm(dataloader, desc="Evaluating", leave=False, dynamic_ncols=True)
 
+    # Setup device type per autocast
     if device.type == 'cuda':
         device_type = 'cuda'
         dtype = torch.float16
-    elif device.type == 'mps':
+    elif device.type == 'mps': # Mac M1/M2/M3
         device_type = 'mps'
         dtype = torch.float16
     else:
@@ -64,12 +79,15 @@ def evaluate(
             input_ids      = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels         = batch["labels"].to(device, non_blocking=True)
+            # Passiamo anche lang_ids per coerenza, anche se con alpha=0 viene ignorato
+            lang_ids       = batch["lang_ids"].to(device, non_blocking=True)
             
             with autocast(device_type=device_type, dtype=dtype):
-                # IMPORTANTE: alpha=0.0 disabilita il ramo avversario (DANN).
+                # alpha=0.0 disabilita DANN durante la validazione
                 logits, loss = model.forward(
                     input_ids, 
                     attention_mask, 
+                    lang_ids=lang_ids,
                     labels=labels, 
                     alpha=0.0 
                 )
@@ -82,11 +100,23 @@ def evaluate(
             predictions.extend(preds.detach().cpu().numpy())
             references.extend(labels.detach().cpu().numpy())
             
-            del input_ids, attention_mask, labels, logits, loss
+            # Pulizia immediata
+            del input_ids, attention_mask, labels, lang_ids, logits, loss
 
+    # Calcolo metriche
     eval_metrics = compute_metrics(predictions, references)
     eval_metrics["loss"] = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
+    
+    # Stampa report dettagliato solo se richiesto (utile a fine epoch)
+    if verbose:
+        report = classification_report(
+            references, predictions, 
+            zero_division=0,
+            digits=4
+        )
+        logger.info(f"\nClassification Report:\n{report}")
 
+    # Pulizia memoria finale
     if device.type == 'cuda':
         torch.cuda.empty_cache()
     elif device.type == 'mps':
