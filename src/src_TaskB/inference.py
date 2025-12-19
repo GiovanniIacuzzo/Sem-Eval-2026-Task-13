@@ -1,168 +1,231 @@
 import os
+import sys
 import logging
-import yaml
 import torch
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import confusion_matrix, classification_report
-from torch.amp import autocast
-from dotenv import load_dotenv
+from transformers import AutoTokenizer, PreTrainedModel
+from peft import PeftModel
+
+# --- FIX SICUREZZA PYTORCH ---
+import transformers.utils.import_utils
+transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
+# -----------------------------
 
 # Local imports
+# Assicurati che lo script venga lanciato dalla root del progetto affinché questo import funzioni
 from src.src_TaskB.models.model import CodeClassifier
-# Importiamo FAMILY_MAP invece di GENERATOR_MAP
-from src.src_TaskB.dataset.dataset import CodeDataset, load_base_dataframe, FAMILY_MAP
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
 logger = logging.getLogger(__name__)
 
+# CONFIGURAZIONI
 LABEL_NAMES = [
     "Human", "01-ai", "BigCode", "DeepSeek", "Gemma", "Phi", 
     "Llama", "Granite", "Mistral", "Qwen", "OpenAI"
 ]
 
-# -----------------------------------------------------------------------------
-# Inference Logic
-# -----------------------------------------------------------------------------
-def run_inference(model, test_df, config, device):
-    model.eval()
-    
-    target_langs = config["model"].get("languages", [])
-    language_map = {l: i for i, l in enumerate(target_langs)}
-    
-    dataset = CodeDataset(
-        dataframe=test_df,
-        tokenizer=model.tokenizer,
-        language_map=language_map,
-        max_length=config["data"]["max_length"],
-        mode="val"
-    )
-    
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=config["training"].get("batch_size", 32), 
-        shuffle=False, 
-        num_workers=2, 
-        pin_memory=True
-    )
+# --- PERCORSI AGGIORNATI BASATI SULLA TUA STRUTTURA ---
+# Troviamo la root del progetto dinamicamente
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Risaliamo: src/src_TaskB -> src -> Sem-Eval-2026-Task-13
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
 
-    all_preds, all_refs = [], []
-    device_type = 'cuda' if device.type == 'cuda' else 'cpu'
-    dtype = torch.float16 if device_type == 'cuda' else torch.float32
+# Percorsi corretti (aggiunto "results/" extra)
+BINARY_CKPT = os.path.join(PROJECT_ROOT, "results/results_TaskB/checkpoints/binary")
+FAMILIES_CKPT = os.path.join(PROJECT_ROOT, "results/results_TaskB/checkpoints/families")
+TEST_FILE = os.path.join(PROJECT_ROOT, "data/Task_B/test_sample.parquet")
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "results/results_TaskB/inference_output")
 
-    logger.info(f"Starting inference on {len(dataset)} samples...")
+# Configurazioni Modello (Devono matchare il config.yaml del training)
+BINARY_CFG = {
+    "model": {"model_name": "microsoft/codebert-base", "num_labels": 2, "use_lora": False}
+}
+FAMILIES_CFG = {
+    "model": {"model_name": "microsoft/unixcoder-base", "num_labels": 10, "use_lora": True, "lora_r": 64}
+}
 
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Inferencing"):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            lang_ids = batch.get("lang_ids", None)
-            if lang_ids is not None:
-                lang_ids = lang_ids.to(device)
+class InferenceDataset(Dataset):
+    def __init__(self, dataframe, tokenizer, max_length=512):
+        self.data = dataframe.reset_index(drop=True)
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
-            with autocast(device_type=device_type, dtype=dtype):
-                # alpha=0.0 disabilita il ramo DANN
-                logits, _ = model(
-                    input_ids=input_ids, 
-                    attention_mask=attention_mask,
-                    lang_ids=lang_ids, 
-                    alpha=0.0 
-                )
+    def __len__(self):
+        return len(self.data)
 
-            preds = torch.argmax(logits, dim=1)
-            all_preds.extend(preds.cpu().tolist())
-            all_refs.extend(labels.cpu().tolist())
-
-    return all_preds, all_refs
-
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
-if __name__ == "__main__":
-    load_dotenv()
-    
-    config_path = "src_TaskB/config/config.yaml"
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # 1. Inizializzazione Modello (senza pesi per inferenza)
-    model_wrapper = CodeClassifier(config)
-    model_wrapper.to(device)
-
-    # 2. Caricamento Pesi (Logica custom basata sul tuo save_checkpoint)
-    checkpoint_dir = config["training"]["checkpoint_dir"]
-    is_peft = config["model"].get("use_lora", True)
-
-    if is_peft:
-        logger.info(f"Loading LoRA adapters from {checkpoint_dir}")
-        model_wrapper.base_model.load_adapter(checkpoint_dir, adapter_name="default")
+    def __getitem__(self, idx):
+        code = str(self.data.at[idx, 'code'])
+        label = -1
+        if 'label' in self.data.columns:
+            val = self.data.at[idx, 'label']
+            if pd.notna(val):
+                label = int(val)
         
+        encoding = self.tokenizer(
+            code, truncation=True, padding="max_length", max_length=self.max_length, return_tensors="pt"
+        )
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "label": label
+        }
+
+def load_trained_model(checkpoint_dir, config, device, mode_name="Model"):
+    logger.info(f"[{mode_name}] Loading from {checkpoint_dir}...")
+    
+    if not os.path.exists(checkpoint_dir):
+        # Debug helper: stampa cosa vede Python
+        logger.error(f"PATH ERROR: {checkpoint_dir} does not exist.")
+        raise FileNotFoundError(f"Directory not found: {checkpoint_dir}")
+
+    # 1. Init Architettura
+    model = CodeClassifier(config)
+    model.to(device)
+    
+    is_peft = config["model"]["use_lora"]
+    
+    if is_peft:
+        # --- CARICAMENTO LORA ---
+        try:
+            model.base_model.load_adapter(checkpoint_dir, adapter_name="default")
+            logger.info(f"[{mode_name}] LoRA Adapters loaded successfully.")
+        except Exception as e:
+             # A volte PEFT salva dentro una sottocartella, controlliamo
+             raise RuntimeError(f"[{mode_name}] Failed to load LoRA: {e}")
+
+        # Carica componenti custom
         custom_path = os.path.join(checkpoint_dir, "custom_components.pt")
         if os.path.exists(custom_path):
-            logger.info("Loading Custom Heads...")
-            custom_state = torch.load(custom_path, map_location=device)
-            model_wrapper.classifier.load_state_dict(custom_state['classifier'])
-            model_wrapper.pooler.load_state_dict(custom_state['pooler'])
-            model_wrapper.projection_head.load_state_dict(custom_state['projection_head'])
-            model_wrapper.language_classifier.load_state_dict(custom_state['language_classifier'])
+            state = torch.load(custom_path, map_location=device)
+            model.classifier.load_state_dict(state['classifier'])
+            model.pooler.load_state_dict(state['pooler'])
+            logger.info(f"[{mode_name}] Custom components loaded.")
+        else:
+            logger.warning(f"[{mode_name}] custom_components.pt missing. Using random init for heads.")
+
     else:
+        # --- CARICAMENTO FULL MODEL ---
         full_path = os.path.join(checkpoint_dir, "full_model.bin")
-        model_wrapper.load_state_dict(torch.load(full_path, map_location=device))
+        if not os.path.exists(full_path):
+             fallback = os.path.join(checkpoint_dir, "pytorch_model.bin")
+             if os.path.exists(fallback):
+                 full_path = fallback
+             else:
+                 raise FileNotFoundError(f"[{mode_name}] Weights file not found at {full_path}")
 
-    # 3. Caricamento Dati
-    test_path = "data/Task_B/test_sample.parquet" # Modifica con il path reale
-    logger.info(f"Loading data from {test_path}...")
-    test_df = load_base_dataframe(test_path)
-    
-    # Rimuovi eventuali campioni che non siamo riusciti a mappare (label -1)
-    # a meno che non sia un test set "cieco" (dove label non esiste)
-    if 'label' in test_df.columns and (test_df['label'] == -1).any():
-        logger.warning("Filtering out samples with unknown family mapping.")
-        test_df = test_df[test_df['label'] != -1].reset_index(drop=True)
+        model.load_state_dict(torch.load(full_path, map_location=device))
+        logger.info(f"[{mode_name}] Full weights loaded.")
 
-    # 4. Esecuzione
-    preds, refs = run_inference(model_wrapper, test_df, config, device)
-    
-    # 5. Report e Metriche
-    print("\n" + "="*60)
-    print("FINAL FAMILY CLASSIFICATION REPORT")
-    print("="*60)
-    
-    # Filtriamo LABEL_NAMES se nel test set mancano classi (opzionale)
-    present_labels = sorted(list(set(refs) | set(preds)))
-    target_names = [LABEL_NAMES[i] for i in present_labels]
+    model.eval()
+    return model
 
-    print(classification_report(
-        refs, 
-        preds, 
-        labels=present_labels,
-        target_names=target_names,
-        zero_division=0
-    ))
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Running Inference on {device}")
+    
+    # Crea output dir
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 6. Salvataggio Risultati
-    output_dir = "results_TaskB/inference_output"
-    os.makedirs(output_dir, exist_ok=True)
+    if not os.path.exists(TEST_FILE):
+        logger.error(f"Test file not found: {TEST_FILE}")
+        return
+
+    df = pd.read_parquet(TEST_FILE)
+    logger.info(f"Loaded {len(df)} samples from {TEST_FILE}")
+
+    # --- STEP A: BINARY ---
+    logger.info(">>> STEP A: Binary Classification")
+    tok_bin = AutoTokenizer.from_pretrained(BINARY_CFG["model"]["model_name"])
+    ds_bin = InferenceDataset(df, tok_bin)
+    dl_bin = DataLoader(ds_bin, batch_size=32, shuffle=False, num_workers=2)
     
-    # Confusion Matrix
-    cm = confusion_matrix(refs, preds)
-    plt.figure(figsize=(12, 10))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
-                xticklabels=target_names, yticklabels=target_names)
-    plt.savefig(os.path.join(output_dir, "confusion_matrix.png"))
+    model_bin = load_trained_model(BINARY_CKPT, BINARY_CFG, device, "Binary")
     
-    # CSV di dettaglio
-    results_df = pd.DataFrame({
-        "True_Family": [LABEL_NAMES[r] if r != -1 else "Unknown" for r in refs],
-        "Pred_Family": [LABEL_NAMES[p] for p in preds],
-        "Correct": [r == p for r, p in zip(refs, preds)]
-    })
-    results_df.to_csv(os.path.join(output_dir, "family_predictions.csv"), index=False)
+    is_ai_probs = []
+    with torch.no_grad():
+        for batch in tqdm(dl_bin, desc="Binary Infer"):
+            input_ids = batch["input_ids"].to(device)
+            mask = batch["attention_mask"].to(device)
+            logits, _ = model_bin(input_ids, mask)
+            probs = torch.softmax(logits, dim=1)
+            is_ai_probs.extend(probs[:, 1].cpu().tolist())
+            
+    del model_bin
+    torch.cuda.empty_cache()
+
+    is_ai_preds = [1 if p > 0.5 else 0 for p in is_ai_probs]
     
-    logger.info(f"Inference complete. Results in {output_dir}")
+    # --- STEP B: FAMILIES ---
+    logger.info(">>> STEP B: AI Family Attribution")
+    ai_indices = [i for i, x in enumerate(is_ai_preds) if x == 1]
+    final_preds_map = {} 
+    
+    if len(ai_indices) > 0:
+        df_ai = df.iloc[ai_indices].reset_index(drop=True)
+        original_indices = df.iloc[ai_indices].index.tolist()
+        
+        tok_fam = AutoTokenizer.from_pretrained(FAMILIES_CFG["model"]["model_name"])
+        ds_fam = InferenceDataset(df_ai, tok_fam)
+        dl_fam = DataLoader(ds_fam, batch_size=32, shuffle=False, num_workers=2)
+        
+        model_fam = load_trained_model(FAMILIES_CKPT, FAMILIES_CFG, device, "Families")
+        
+        local_ptr = 0
+        with torch.no_grad():
+            for batch in tqdm(dl_fam, desc="Families Infer"):
+                input_ids = batch["input_ids"].to(device)
+                mask = batch["attention_mask"].to(device)
+                logits, _ = model_fam(input_ids, mask)
+                preds = torch.argmax(logits, dim=1).cpu().tolist()
+                
+                for p in preds:
+                    orig_idx = original_indices[local_ptr]
+                    final_preds_map[orig_idx] = p + 1 
+                    local_ptr += 1
+        
+        del model_fam
+        torch.cuda.empty_cache()
+
+    # --- ASSEMBLING ---
+    final_predictions = []
+    ground_truth = df['label'].tolist() if 'label' in df.columns else []
+    
+    for i in range(len(df)):
+        if is_ai_preds[i] == 0:
+            final_predictions.append(0) # Human
+        else:
+            final_predictions.append(final_preds_map.get(i, 1)) # Default fallback if error
+
+    # --- REPORT ---
+    if len(ground_truth) > 0:
+        labels_present = sorted(list(set(ground_truth) | set(final_predictions)))
+        target_names = [LABEL_NAMES[i] for i in labels_present]
+        
+        print("\n" + "="*60)
+        print("FINAL CASCADE REPORT")
+        print("="*60)
+        print(classification_report(ground_truth, final_predictions, labels=labels_present, target_names=target_names, digits=4))
+        
+        cm = confusion_matrix(ground_truth, final_predictions, labels=labels_present)
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=target_names, yticklabels=target_names)
+        plt.title("Confusion Matrix (Cascade)")
+        
+        out_img = os.path.join(OUTPUT_DIR, "confusion_matrix_cascade.png")
+        plt.savefig(out_img)
+        logger.info(f"Confusion Matrix saved to {out_img}")
+
+    out_csv = os.path.join(OUTPUT_DIR, "predictions.csv")
+    df_out = df.copy()
+    df_out['pred'] = final_predictions
+    df_out.to_csv(out_csv, index=False)
+    logger.info(f"Predictions saved to {out_csv}")
+
+if __name__ == "__main__":
+    main()

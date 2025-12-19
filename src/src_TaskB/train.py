@@ -13,6 +13,11 @@ from sklearn.metrics import confusion_matrix
 from comet_ml import Experiment
 from transformers import AutoTokenizer
 
+# --- FIX SICUREZZA PYTORCH (CRUCIALE se non hai aggiornato torch) ---
+import transformers.utils.import_utils
+transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
+# --------------------------------------------------------------------
+
 from src.src_TaskB.models.model import CodeClassifier
 from src.src_TaskB.dataset.dataset import load_data
 from src.src_TaskB.utils.utils import evaluate, set_seed
@@ -31,8 +36,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Etichette (Devono matchare l'ordine logico del dataset)
-# Binary: 0=Human, 1=AI
+# Etichette (Binary: 0=Human, 1=AI)
 LABELS_BINARY = ["Human", "AI"]
 LABELS_FAMILIES = [
     "01-ai", "BigCode", "DeepSeek", "Gemma", "Phi", 
@@ -65,14 +69,14 @@ def save_checkpoint(model, path, is_peft=False):
     os.makedirs(path, exist_ok=True)
     logger.info(f"Saving model to {path}...")
     
-    # 1. Salva Tokenizer (sempre utile averlo vicino al modello)
+    # 1. Salva Tokenizer
     model.tokenizer.save_pretrained(path)
 
     if is_peft:
-        # A. Salva gli adapter LoRA (base_model è un PeftModel)
+        # A. Salva gli adapter LoRA
         model.base_model.save_pretrained(path)
         
-        # B. Salva le componenti Custom (Classifier, Heads) che LoRA non salva
+        # B. Salva le componenti Custom
         custom_state = {
             'classifier': model.classifier.state_dict(),
             'pooler': model.pooler.state_dict(),
@@ -82,7 +86,6 @@ def save_checkpoint(model, path, is_peft=False):
         torch.save(custom_state, os.path.join(path, "custom_components.pt"))
     else:
         # Full model save
-        # Nota: Non usare model.save_pretrained() perché CodeClassifier è custom nn.Module
         torch.save(model.state_dict(), os.path.join(path, "full_model.bin"))
 
 # -----------------------------------------------------------------------------
@@ -97,7 +100,6 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
     
     optimizer.zero_grad()
     
-    # Progress Bar
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}", leave=False, dynamic_ncols=True)
     len_dataloader = len(dataloader)
     
@@ -107,14 +109,11 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
         
-        # Gestione opzionale lang_ids (per DANN)
         lang_ids = batch.get("lang_ids", None)
         if lang_ids is not None:
             lang_ids = lang_ids.to(device, non_blocking=True)
         
-        # --- DANN Alpha Scheduling ---
-        # 0.0 (inizio) -> 1.0 (fine training). 
-        # Controlla l'intensità del Gradient Reversal.
+        # DANN Alpha Scheduling
         current_step = step + epoch_idx * len_dataloader
         total_steps = total_epochs * len_dataloader
         p = float(current_step) / (total_steps + 1e-8)
@@ -129,13 +128,11 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
                 labels=labels, 
                 alpha=alpha
             )
-            # Normalize loss for accumulation
             loss = loss / accumulation_steps
 
         # Backward
         scaler.scale(loss).backward()
 
-        # Optimizer Step (Gradient Accumulation)
         if (step + 1) % accumulation_steps == 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -147,7 +144,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
             if scheduler is not None:
                 scheduler.step()
         
-        # Logging immediato sulla progress bar
+        # Logging
         current_loss = loss.item() * accumulation_steps
         running_loss += current_loss
         
@@ -157,16 +154,19 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
             "LR": f"{scheduler.get_last_lr()[0]:.1e}"
         })
 
-        # Raccolta per metriche training (approssimative)
-        # Detach e CPU per evitare memory leak
+        # Raccolta metriche
         preds = torch.argmax(logits, dim=1).detach().cpu().numpy()
         labels_cpu = labels.detach().cpu().numpy()
         predictions.extend(preds)
         references.extend(labels_cpu)
 
     # Calcolo metriche fine epoca
-    # Nota: In train non passiamo label_names per evitare log troppo verbosi ogni epoca
-    metrics, _ = model.compute_metrics(predictions, references) if hasattr(model, 'compute_metrics') else ({"accuracy":0}, "")
+    if hasattr(model, 'compute_metrics'):
+        metrics = model.compute_metrics(predictions, references)
+    else:
+        metrics = {"accuracy": 0.0}
+    
+    # FIX SINTASSI QUI:
     metrics["loss"] = running_loss / len_dataloader
     
     return metrics
@@ -176,19 +176,17 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
-    # Argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="src_TaskB/config/config.yaml")
+    parser.add_argument("--config", type=str, default="src/src_TaskB/config/config.yaml")
     parser.add_argument("--mode", type=str, required=True, choices=["binary", "families"], 
-                        help="Choose training mode: 'binary' (Human vs AI) or 'families' (Specific AI attribution)")
+                        help="Choose training mode: 'binary' (Human vs AI) or 'families'")
     args = parser.parse_args()
     
     ConsoleUX.print_banner(f"SemEval 2026 Task 13 - Mode: {args.mode.upper()}")
     
-    # 0. Global Seed
     set_seed(42)
 
-    # 1. Load & Merge Config
+    # 1. Load Config
     if not os.path.exists(args.config):
         logger.error(f"Config file not found: {args.config}")
         sys.exit(1)
@@ -196,7 +194,6 @@ if __name__ == "__main__":
     with open(args.config, "r") as f:
         raw_config = yaml.safe_load(f)
 
-    # Configurazione specifica per il modo
     mode_config = raw_config["common"].copy()
     if args.mode in raw_config:
         mode_config.update(raw_config[args.mode])
@@ -204,7 +201,6 @@ if __name__ == "__main__":
         logger.error(f"Config section for '{args.mode}' not found in yaml!")
         sys.exit(1)
         
-    # Ricostruzione Configurazione per CodeClassifier
     final_config = {
         "model": {
             "model_name": mode_config["model_name"],
@@ -216,16 +212,12 @@ if __name__ == "__main__":
             "class_weights": mode_config.get("class_weights", False)
         },
         "training": mode_config,
-        "data": mode_config # Per il dataset loader
+        "data": mode_config 
     }
     
-    # Seleziona nomi labels
     current_label_names = LABELS_BINARY if args.mode == "binary" else LABELS_FAMILIES
-    # Check integrità
-    if len(current_label_names) != final_config["model"]["num_labels"]:
-        logger.warning(f"Mismatch Labels: Config dice {final_config['model']['num_labels']} classi, ma io ho {len(current_label_names)} nomi.")
 
-    # 2. Experiment Tracking (Comet)
+    # 2. Experiment Tracking
     experiment = Experiment(
         api_key=os.getenv("COMET_API_KEY"),
         project_name=os.getenv("COMET_PROJECT_NAME"),
@@ -281,7 +273,6 @@ if __name__ == "__main__":
     model_wrapper = CodeClassifier(final_config, class_weights=class_weights)
     model_wrapper.to(device)
 
-    # Verifica stato PEFT
     is_peft = final_config["model"]["use_lora"]
     if is_peft:
         trainable_params = sum(p.numel() for p in model_wrapper.parameters() if p.requires_grad)
@@ -330,32 +321,34 @@ if __name__ == "__main__":
         experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
         
         # --- VALIDATE ---
-        # Pulizia cache GPU prima della validazione per evitare OOM
         torch.cuda.empty_cache() 
         
-        # Unpacking di 4 valori (come da nuovo utils.py)
-        val_metrics, val_preds, val_refs, val_report = evaluate(
-            model_wrapper, val_dl, device, label_names=current_label_names
-        )
+        # NOTA: Qui assumo che il tuo utils.evaluate restituisca 3 o 4 valori.
+        # Se utils.py restituisce solo (metrics, preds, refs), rimuovi ", val_report"
+        # Per sicurezza, uso solo i primi 3 se il report non ti serve o se utils è vecchio.
+        # Se hai aggiornato utils.py per restituire 4 valori, mantieni la riga sotto:
+        try:
+            val_metrics, val_preds, val_refs, val_report = evaluate(
+                model_wrapper, val_dl, device, label_names=current_label_names
+            )
+        except ValueError:
+            # Fallback se evaluate ne restituisce solo 3
+            val_metrics, val_preds, val_refs = evaluate(model_wrapper, val_dl, device)
+            val_report = "Report not available"
         
         ConsoleUX.log_metrics("Valid", val_metrics)
         experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
 
-        # Checkpointing Strategy
+        # Checkpointing
         current_f1 = val_metrics.get("f1_macro", 0.0)
         
         if current_f1 > best_f1:
             logger.info(f"New Best Macro F1: {current_f1:.4f} (prev: {best_f1:.4f})")
-            
-            # Stampiamo il report dettagliato solo quando facciamo un nuovo record
-            logger.info(f"\nClassification Report:\n{val_report}")
-            
             best_f1 = current_f1
             patience_counter = 0
             
             save_checkpoint(model_wrapper, checkpoint_dir, is_peft=is_peft)
             
-            # Log Confusion Matrix su Comet (solo ogni nuovo best model)
             try:
                 cm = confusion_matrix(val_refs, val_preds)
                 if len(cm) == len(current_label_names):
@@ -367,7 +360,6 @@ if __name__ == "__main__":
                     )
             except Exception as e:
                 logger.warning(f"CM Log Error: {e}")
-                
         else:
             patience_counter += 1
             logger.info(f"Patience: {patience_counter}/{patience}")

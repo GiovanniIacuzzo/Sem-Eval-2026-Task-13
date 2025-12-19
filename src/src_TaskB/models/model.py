@@ -55,7 +55,7 @@ class AttentionHead(nn.Module):
         # Masking padding tokens
         # Usa valore molto basso (-1e9) per softmax
         if attention_mask is not None:
-             attn_scores = attn_scores.masked_fill(attention_mask == 0, -1e9)
+             attn_scores = attn_scores.masked_fill(attention_mask == 0, -1e4)
         
         attn_weights = self.dropout(F.softmax(attn_scores, dim=-1)) # [Batch, SeqLen]
         
