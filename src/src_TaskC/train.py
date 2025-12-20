@@ -4,8 +4,6 @@ import logging
 import yaml
 import torch
 import numpy as np
-import zipfile
-import shutil
 import argparse
 import gc
 import pandas as pd
@@ -18,18 +16,10 @@ from sklearn.model_selection import StratifiedKFold
 from transformers import AutoTokenizer
 from comet_ml import Experiment
 
-try:
-    from kaggle.api.kaggle_api_extended import KaggleApi
-    KAGGLE_AVAILABLE = True
-except ImportError:
-    KAGGLE_AVAILABLE = False
-    print("Warning: 'kaggle' library not found. Auto-download disabled.")
-
-# --- IMPORTS AGGIORNATI (Assicurati che dataset.py sia aggiornato) ---
-from src_TaskC.models.model import CodeClassifier
-# Importiamo le classi specifiche per gestire la creazione dinamica dei dataset
-from src_TaskC.dataset.dataset import CodeDataset, load_data_for_kfold, get_dynamic_language_map, get_class_weights
-from src_TaskC.utils.utils import evaluate
+# --- IMPORTS AGGIORNATI ---
+from src.src_TaskC.models.model import CodeClassifier
+from src.src_TaskC.dataset.dataset import CodeDataset, load_data_for_kfold, get_dynamic_language_map, get_class_weights
+from src.src_TaskC.utils.utils import evaluate
 
 # -----------------------------------------------------------------------------
 # Configuration & Setup
@@ -62,39 +52,6 @@ class ConsoleUX:
             else:
                 log_str += f"{k}: {v} | "
         logger.info(log_str.strip(" | "))
-
-# -----------------------------------------------------------------------------
-# Kaggle Data Helper
-# -----------------------------------------------------------------------------
-def setup_kaggle_data(download_dir="./data"):
-    COMPETITION_SLUG = "semeval-2026-task-13-subtask-c" 
-    task_dir = os.path.join(download_dir, "Task_C") 
-    train_file = os.path.join(task_dir, "train.parquet")
-    
-    if os.path.exists(train_file):
-        logger.info(f"Data found in {task_dir}. Skipping download.")
-        return task_dir
-
-    if not KAGGLE_AVAILABLE:
-        logger.error("Kaggle lib not installed & data missing. Please download manually.")
-        sys.exit(1)
-
-    logger.info(f"Downloading data from Kaggle: {COMPETITION_SLUG}...")
-    try:
-        api = KaggleApi()
-        api.authenticate()
-        os.makedirs(task_dir, exist_ok=True)
-        api.competition_download_files(COMPETITION_SLUG, path=task_dir, quiet=False)
-        for item in os.listdir(task_dir):
-            if item.endswith(".zip"):
-                zip_path = os.path.join(task_dir, item)
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(task_dir)
-                os.remove(zip_path)
-        return task_dir
-    except Exception as e:
-        logger.error(f"Kaggle download failed: {e}")
-        raise e
 
 # -----------------------------------------------------------------------------
 # Training Routine Single Epoch
@@ -161,19 +118,31 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
     return metrics
 
 # -----------------------------------------------------------------------------
-# Main Execution (K-FOLD LEAKAGE FREE)
+# Main Execution (K-FOLD LEAKAGE FREE - OFFLINE MODE)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
-    ConsoleUX.print_banner("SemEval 2026 Task 13 - Subtask C (K-Fold Leakage-Free)")
+    ConsoleUX.print_banner("SemEval 2026 Task 13 - Subtask C (K-Fold Optimized)")
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="src_TaskC/config/config.yaml") 
+    parser.add_argument("--config", type=str, default="src/src_TaskC/config/config.yaml") 
     parser.add_argument("--k_folds", type=int, default=5, help="Number of CV folds")
     args = parser.parse_args()
 
+    # --- 1. DATA PATH SETUP (OFFLINE) ---
     DATA_ROOT = os.getenv("DATA_PATH", "./data")
-    task_data_dir = setup_kaggle_data(DATA_ROOT) 
+    task_data_dir = os.path.join(DATA_ROOT, "Task_C")
+    
+    # Verifica che i dati esistano davvero
+    train_file = os.path.join(task_data_dir, "train.parquet")
+    val_file = os.path.join(task_data_dir, "validation.parquet")
+
+    if not os.path.exists(train_file):
+        logger.error(f"❌ DATA NOT FOUND! Expected 'train.parquet' in: {task_data_dir}")
+        logger.error("Please ensure you have downloaded the data into the './data/Task_C/' folder.")
+        sys.exit(1)
+    
+    logger.info(f"📂 Data Source: {task_data_dir}")
     
     config_path = args.config
     if not os.path.exists(config_path):
@@ -183,14 +152,15 @@ if __name__ == "__main__":
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
-    config["data"]["train_path"] = os.path.join(task_data_dir, "train.parquet")
-    config["data"]["val_path"] = os.path.join(task_data_dir, "validation.parquet")
+    # Aggiorniamo i path nel config con quelli verificati
+    config["data"]["train_path"] = train_file
+    config["data"]["val_path"] = val_file
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
     # =========================================================================
-    # 1. SETUP DATA (PANDAS ONLY)
+    # 2. SETUP DATA (PANDAS ONLY)
     # =========================================================================
     # Carichiamo il DataFrame completo SENZA creare ancora i Dataset PyTorch
     full_df = load_data_for_kfold(config)
@@ -199,7 +169,7 @@ if __name__ == "__main__":
     language_map = get_dynamic_language_map(full_df)
     config["model"]["num_languages"] = len(language_map) # Aggiorna config
     
-    # Carichiamo il tokenizer in modo ottimizzato (senza caricare tutto il modello)
+    # Carichiamo il tokenizer in modo ottimizzato
     model_name = config["model"]["model_name"]
     logger.info(f"Loading Tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -220,7 +190,7 @@ if __name__ == "__main__":
     experiment.log_parameters(config)
 
     # =========================================================================
-    # 2. K-FOLD LOOP
+    # 3. K-FOLD LOOP
     # =========================================================================
     for fold, (train_idx, val_idx) in enumerate(kf.split(np.zeros(len(y_all)), y_all)):
         ConsoleUX.print_banner(f"FOLD {fold+1}/{args.k_folds}")
@@ -233,7 +203,6 @@ if __name__ == "__main__":
         class_weights = get_class_weights(train_df_fold, device)
         
         # C. Creazione Dataset PyTorch (Augmentation differenziata)
-        # 
         logger.info(f"Creating Datasets for Fold {fold+1}...")
         train_dataset = CodeDataset(
             dataframe=train_df_fold, 

@@ -51,9 +51,9 @@ model:
 # Training Hyperparameters
 # ---------------------
 training:
-  output_dir: "./results_TaskC"
-  checkpoint_dir: "./results_TaskC/checkpoints"
-  log_dir: "./results_TaskC/logs"
+  output_dir: "./results/results_TaskC"
+  checkpoint_dir: "./results/results_TaskC/checkpoints"
+  log_dir: "./results/results_TaskC/logs"
   
   num_epochs: 10
   early_stop_patience: 3

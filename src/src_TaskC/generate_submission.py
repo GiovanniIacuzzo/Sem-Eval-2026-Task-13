@@ -4,17 +4,22 @@ import logging
 import yaml
 import torch
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torch.amp import autocast
 from dotenv import load_dotenv
 from typing import List, Optional
+from copy import deepcopy
 
 # Import PEFT per LoRA
-from peft import PeftModel
+try:
+    from peft import PeftModel
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
 
-from src_TaskA.models.model import CodeClassifier
-from src_TaskA.dataset.Inference_dataset import InferenceDataset
+from src.src_TaskC.models.model import CodeClassifier
 
 # -----------------------------------------------------------------------------
 # Configuration & UX
@@ -28,91 +33,125 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ConsoleUX:
-    """Helper class for consistent console feedback."""
     @staticmethod
     def print_banner(text: str):
         print(f"\n{'-'*60}\n{text.center(60)}\n{'-'*60}")
 
 # -----------------------------------------------------------------------------
-# Robust Model Loading Logic (LoRA + Custom Heads)
+# Inference Dataset Class
 # -----------------------------------------------------------------------------
-def load_model_for_submission(config_path: str, checkpoint_dir: str, device: torch.device):
+class InferenceDataset(Dataset):
     """
-    Carica il modello per la sottomissione gestendo LoRA e Custom Heads.
+    Dataset specifico per la generazione della submission.
+    Restituisce l'ID originale invece della label.
     """
-    # 1. Load Config
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    logger.info("Initializing Model Architecture...")
-    model = CodeClassifier(config)
-    
-    # Paths
-    adapter_path = checkpoint_dir
-    heads_path = os.path.join(checkpoint_dir, "heads.pt")
-    
-    # Path alternativi per Full Model
-    new_model_path = os.path.join(checkpoint_dir, "best_model_taskA.pt")
-    old_model_path = os.path.join(checkpoint_dir, "best_model.pt")
-
-    # Verifica LoRA
-    is_lora = os.path.exists(os.path.join(checkpoint_dir, "adapter_config.json"))
-    
-    if is_lora:
-        logger.info(f"Detected LoRA checkpoint in {checkpoint_dir}")
-        model.base_model = PeftModel.from_pretrained(model.base_model, adapter_path)
+    def __init__(self, dataframe, tokenizer, max_length, id_col):
+        self.data = dataframe.reset_index(drop=True)
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.id_col = id_col
         
-        if os.path.exists(heads_path):
-            logger.info(f"Loading custom heads from {heads_path}...")
-            heads_state = torch.load(heads_path, map_location=device, weights_only=False)
+        # Mappa lingue dummy per evitare crash nel forward pass
+        self.lang_map_dummy = {'python': 0} 
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        code = str(row["code"])
+        sample_id = row[self.id_col]
+        
+        # Semplice troncatura se troppo lungo
+        if len(code) > self.max_length * 4:
+            code = code[:self.max_length * 4]
+
+        encoding = self.tokenizer(
+            code,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+        
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "id": sample_id,
+            "lang_ids": torch.tensor(0, dtype=torch.long) # Dummy
+        }
+
+# -----------------------------------------------------------------------------
+# Ensemble Loading Logic (Robust)
+# -----------------------------------------------------------------------------
+def load_ensemble_models(config, checkpoint_dir, device, k_folds=5) -> List[CodeClassifier]:
+    """
+    Carica i 5 modelli trained con K-Fold per l'Ensemble.
+    """
+    models = []
+    logger.info(f"Searching for {k_folds} folds in {checkpoint_dir}...")
+    
+    for fold in range(k_folds):
+        fold_dir = os.path.join(checkpoint_dir, f"fold_{fold}")
+        if not os.path.exists(fold_dir):
+            logger.warning(f"⚠️ Checkpoint for Fold {fold} not found. Skipping.")
+            continue
             
-            # Caricamento Safe
-            if 'classifier' in heads_state:
-                model.classifier.load_state_dict(heads_state['classifier'])
-            if 'pooler' in heads_state:
-                model.pooler.load_state_dict(heads_state['pooler'])
-            # Projection e Language non servono per submission ma le carichiamo per coerenza
-            if 'projection' in heads_state:
-                model.projection_head.load_state_dict(heads_state['projection'])
+        logger.info(f"Loading Fold {fold}...")
+        
+        # 1. Configurazione Pulita (No auto-LoRA init)
+        config_clean = deepcopy(config)
+        config_clean["model"]["use_lora"] = False
+        
+        # 2. Inizializza Modello Base
+        model = CodeClassifier(config_clean)
+        
+        # 3. Applica Pesi (LoRA o Full)
+        if config["model"].get("use_lora", False) and PEFT_AVAILABLE:
+            # Load Adapter
+            model.base_model = PeftModel.from_pretrained(model.base_model, fold_dir)
+            
+            # Load Head
+            head_path = os.path.join(fold_dir, "head.pt")
+            if os.path.exists(head_path):
+                heads_state = torch.load(head_path, map_location=device)
+                model.classifier.load_state_dict(heads_state)
+            else:
+                logger.error(f"❌ Head missing for Fold {fold}!")
         else:
-            logger.warning(f"Heads file not found! Classifier will be RANDOM.")
+            # Full Model
+            model_path = os.path.join(fold_dir, "model.pt")
+            state_dict = torch.load(model_path, map_location=device)
+            model.load_state_dict(state_dict)
             
-    elif os.path.exists(new_model_path):
-        logger.info(f"Loading NEW Full Model from {new_model_path}")
-        state_dict = torch.load(new_model_path, map_location=device, weights_only=False)
-        model.load_state_dict(state_dict, strict=False)
+        model.to(device)
+        model.eval()
+        models.append(model)
+    
+    if not models:
+        raise ValueError("No models loaded!")
         
-    elif os.path.exists(old_model_path):
-        logger.warning(f"Loading OLD Full Model from {old_model_path}")
-        state_dict = torch.load(old_model_path, map_location=device, weights_only=False)
-        model.load_state_dict(state_dict, strict=False)
-            
-    else:
-        raise FileNotFoundError(f"No checkpoint found in {checkpoint_dir}")
-
-    model.to(device)
-    model.eval()
-    return model
+    return models
 
 # -----------------------------------------------------------------------------
-# Submission Logic
+# Submission Generation Logic
 # -----------------------------------------------------------------------------
-def run_inference_pipeline(
-    model_wrapper: CodeClassifier, 
+def run_ensemble_submission(
+    models: List[CodeClassifier], 
     test_df: pd.DataFrame, 
     id_col_name: str, 
     output_file: str, 
     device: torch.device,
+    max_length: int, 
     batch_size: int = 32
 ):
-    """
-    Executes the full inference pipeline: Dataset prep -> Inference -> CSV Generation.
-    """
-    # Initialize Dataset (Nessuna augmentation per submission)
+    # Usiamo il tokenizer del primo modello
+    tokenizer = models[0].tokenizer
+    
     dataset = InferenceDataset(
         dataframe=test_df, 
-        tokenizer=model_wrapper.tokenizer, 
-        max_length=model_wrapper.max_length,
+        tokenizer=tokenizer, 
+        max_length=max_length, 
         id_col=id_col_name
     )
     
@@ -125,48 +164,54 @@ def run_inference_pipeline(
     )
 
     ids: List[str] = []
-    predictions: List[int] = []
+    final_predictions: List[int] = []
 
-    logger.info(f"Starting inference on {len(dataset)} samples...")
+    logger.info(f"Starting Ensemble Inference on {len(dataset)} samples...")
 
-    # Precision settings
-    device_type = "cuda" if device.type == "cuda" else "cpu"
-    dtype = torch.float16 if device_type == "cuda" else torch.float32
-
-    # Inference Loop
     with torch.no_grad():
-        progress_bar = tqdm(dataloader, desc="Generating Predictions", dynamic_ncols=True)
-        
-        for batch in progress_bar:
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            batch_ids = batch["id"]
-
-            with autocast(device_type=device_type, dtype=dtype):
-                # IMPORTANTE: alpha=0.0 per disabilitare DANN
-                logits, _ = model_wrapper(input_ids, attention_mask, alpha=0.0)
+        for batch in tqdm(dataloader, desc="Predicting", dynamic_ncols=True):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
             
-            # Greedy decoding
-            preds = torch.argmax(logits, dim=1).cpu().tolist()
+            # --- FIX: Converti Tensor ID in lista Python ---
+            batch_ids = batch["id"]
+            if isinstance(batch_ids, torch.Tensor):
+                batch_ids = batch_ids.tolist()
+            # -----------------------------------------------
+            
+            # Accumula probabilità da tutti i modelli
+            sum_probs = None
+            
+            for model in models:
+                # alpha=0.0 disabilita DANN
+                logits, _ = model(input_ids, attention_mask, alpha=0.0)
+                probs = torch.softmax(logits, dim=1)
+                
+                if sum_probs is None:
+                    sum_probs = probs
+                else:
+                    sum_probs += probs
+            
+            # Media delle probabilità
+            avg_probs = sum_probs / len(models)
+            
+            # Argmax finale
+            preds = torch.argmax(avg_probs, dim=1).cpu().tolist()
             
             ids.extend(batch_ids)
-            predictions.extend(preds)
+            final_predictions.extend(preds)
 
-    # Artifact Generation
+    # Creazione DataFrame Submission
     submission_df = pd.DataFrame({
-        id_col_name: ids,  
-        "label": predictions
+        "ID": ids,   # Qui gli ID saranno puliti (es. 437, non tensor(437))
+        "label": final_predictions
     })
     
-    # Ensure output directory hierarchy exists
-    output_dir = os.path.dirname(output_file)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir, exist_ok=True)
-
-    # Write to disk
+    # Salvataggio
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     submission_df.to_csv(output_file, index=False)
     
-    logger.info(f"Submission artifact saved: {output_file}")
+    logger.info(f"Submission saved to: {output_file}")
     print(f"\nPreview:\n{submission_df.head().to_string(index=False)}")
 
 # -----------------------------------------------------------------------------
@@ -176,68 +221,70 @@ def main():
     load_dotenv()
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     
-    ConsoleUX.print_banner("SemEval Task 13 - Submission Generator")
+    ConsoleUX.print_banner("SemEval Task 13 (C) - Submission Generator")
 
     # 1. Configuration
-    config_path = "src_TaskA/config/config.yaml"
-    # Percorso dei checkpoint generati dal train.py
-    checkpoint_dir = "results_TaskA/checkpoints"
+    config_path = "src/src_TaskC/config/config.yaml"
+    checkpoint_dir = "results/results_TaskC/checkpoints"
     
     if not os.path.exists(config_path):
         logger.critical(f"Config file missing: {config_path}")
         sys.exit(1)
+        
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
 
     # 2. Hardware Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
-    # 3. Model Initialization & Loading
+    # 3. Load Ensemble Models
     try:
-        model_wrapper = load_model_for_submission(config_path, checkpoint_dir, device)
+        models = load_ensemble_models(config, checkpoint_dir, device, k_folds=5)
     except Exception as e:
-        logger.critical(f"Model initialization failed: {e}")
-        logger.info("Tip: Did you complete the training successfully?")
+        logger.critical(f"Model loading failed: {e}")
         sys.exit(1)
 
     # 4. Data Ingestion
-    test_path = "data/Task_A/test.parquet"
-    
+    test_path = "data/Task_C/test.parquet"
     if not os.path.exists(test_path):
-        logger.error(f"Test dataset not found at: {test_path}")
-        # Fallback a validation per testare il codice se manca il test ufficiale
-        if os.path.exists("data/Task_A/validation.parquet"):
-            logger.warning("Falling back to validation.parquet for testing code logic...")
-            test_path = "data/Task_A/validation.parquet"
-        else:
-            sys.exit(1)
+        logger.warning(f"Test file {test_path} NOT found. Looking for Kaggle test data...")
+        test_path = "data/Task_C/test_sample.parquet" 
+        
+    if not os.path.exists(test_path):
+        logger.error("No test data found! Please put 'test.parquet' in data/Task_C/")
+        sys.exit(1)
 
     logger.info(f"Loading Test Data: {test_path}")
     df = pd.read_parquet(test_path)
     
-    # 5. Schema Validation (ID Column)
-    possible_id_cols = ["id", "ID", "sample_id"]
+    # 5. ID Column Detection
+    possible_id_cols = ["id", "ID", "sample_id", "row_id"]
     id_col_name = next((col for col in possible_id_cols if col in df.columns), None)
             
     if not id_col_name:
-        # Se manca l'ID, ne creiamo uno fittizio per non crashare
-        logger.warning("Missing ID column. Creating fake index IDs.")
+        logger.warning("Missing ID column. Creating fake index IDs (CHECK THIS!).")
         df["id"] = range(len(df))
         id_col_name = "id"
     
-    logger.info(f"Target ID Column: '{id_col_name}'")
+    logger.info(f"Using ID Column: '{id_col_name}'")
 
     # 6. Pre-processing
-    df['code'] = df['code'].str.slice(0, 4096)
+    df = df.dropna(subset=['code'])
+    df['code'] = df['code'].astype(str)
 
     # 7. Execution
-    output_file = "./results_TaskA/submission/submission_task_a.csv"
+    output_file = "results/results_TaskC/submission/submission_task_c.csv"
     
-    run_inference_pipeline(
-        model_wrapper=model_wrapper, 
+    max_len = config["data"].get("max_length", 512)
+    
+    run_ensemble_submission(
+        models=models, 
         test_df=df, 
         id_col_name=id_col_name, 
         output_file=output_file, 
         device=device,
+        max_length=max_len, 
         batch_size=32 
     )
 
