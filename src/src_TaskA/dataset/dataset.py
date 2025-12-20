@@ -1,15 +1,10 @@
-import os
 import random
 import logging
 import pandas as pd
 import torch
-import numpy as np
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, Dict
 from torch.utils.data import Dataset
 
-# -----------------------------------------------------------------------------
-# Logger Setup
-# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 if not logger.handlers:
@@ -18,9 +13,6 @@ if not logger.handlers:
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-# -----------------------------------------------------------------------------
-# PyTorch Dataset Class
-# -----------------------------------------------------------------------------
 class CodeDataset(Dataset):
     """
     Optimized PyTorch Dataset with Human-Style Structural Noise.
@@ -51,18 +43,12 @@ class CodeDataset(Dataset):
         lines = code.split('\n')
         new_lines = []
         for line in lines:
-            # 1. Human Hesitation: Aggiunge righe vuote (8% prob)
             if random.random() < 0.08:
                 new_lines.append("")
-            
-            # 2. Trailing Whitespace: Sporca la fine riga (5% prob)
             if random.random() < 0.05:
                 line = line + " " * random.randint(1, 3)
-            
-            # 3. Indentation Noise: Spazio extra a inizio riga (1% prob)
             if random.random() < 0.01:
                 line = " " + line
-
             new_lines.append(line)
         
         return "\n".join(new_lines)
@@ -74,26 +60,15 @@ class CodeDataset(Dataset):
         
         lang_id = self.language_map.get(lang_str, -1)
         
-        # ---------------------------------------------------------
-        # 1. Structural Augmentation (Solo in training!)
-        # ---------------------------------------------------------
         if self.augment:
             code = self._structural_noise(code)
 
-        # ---------------------------------------------------------
-        # 2. Random Cropping Strategy
-        # ---------------------------------------------------------
-        # Prende una finestra casuale invece che solo l'inizio
         if self.augment and len(code) > self.max_length * 4:
-            # Lascia un margine alla fine
             max_start = len(code) - int(self.max_length * 3.5)
             if max_start > 0:
                 start_idx = random.randint(0, max_start)
                 code = code[start_idx : start_idx + int(self.max_length * 4)]
 
-        # ---------------------------------------------------------
-        # 3. Tokenization
-        # ---------------------------------------------------------
         encoding = self.tokenizer(
             code,
             truncation=True,
@@ -105,9 +80,6 @@ class CodeDataset(Dataset):
         input_ids = encoding["input_ids"].squeeze(0)
         attention_mask = encoding["attention_mask"].squeeze(0)
 
-        # ---------------------------------------------------------
-        # 4. Token Masking
-        # ---------------------------------------------------------
         if self.augment:
             probability_matrix = torch.full(input_ids.shape, 0.15)
             special_tokens_mask = self.tokenizer.get_special_tokens_mask(
@@ -126,7 +98,6 @@ class CodeDataset(Dataset):
             "lang_ids": torch.tensor(lang_id, dtype=torch.long)
         }
 
-# ... (Le funzioni load_and_preprocess e balance_languages restano uguali a prima)
 def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataFrame:
     columns = ['code', 'label', 'language']
     try:
@@ -172,7 +143,7 @@ def load_data(config: dict, tokenizer) -> Tuple[CodeDataset, CodeDataset, pd.Dat
     return train_dataset, val_dataset, train_df, val_df
 
 # -----------------------------------------------------------------------------
-# Main Data Loading Interface
+# Main Data Loading
 # -----------------------------------------------------------------------------
 def load_data(config: dict, tokenizer) -> Tuple[CodeDataset, CodeDataset, pd.DataFrame, pd.DataFrame]:
     logger.info(">>> Loading Data for Task A <<<")
@@ -183,12 +154,10 @@ def load_data(config: dict, tokenizer) -> Tuple[CodeDataset, CodeDataset, pd.Dat
     train_df = load_and_preprocess(train_path)
     val_df   = load_and_preprocess(val_path)
     
-    # Balancing
     samples_cap = config["data"].get("samples_per_lang", 4000)
     if config["data"].get("balance_languages", True):
         train_df = balance_languages(train_df, target_samples=samples_cap)
     
-    # DANN Mapping
     target_langs = config["model"].get("languages", ["python", "java", "cpp"])
     language_map = {lang.lower(): i for i, lang in enumerate(target_langs)}
     logger.info(f"DANN Language Map Size: {len(language_map)}")

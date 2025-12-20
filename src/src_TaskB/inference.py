@@ -1,48 +1,35 @@
 import os
-import sys
 import logging
 import torch
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix, classification_report
-from transformers import AutoTokenizer, PreTrainedModel
-from peft import PeftModel
+from transformers import AutoTokenizer
 
-# --- FIX SICUREZZA PYTORCH ---
 import transformers.utils.import_utils
 transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
-# -----------------------------
 
-# Local imports
-# Assicurati che lo script venga lanciato dalla root del progetto affinché questo import funzioni
 from src.src_TaskB.models.model import CodeClassifier
+from src.src_TaskB.dataset.Inference_dataset import InferenceDataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
 logger = logging.getLogger(__name__)
 
-# CONFIGURAZIONI
 LABEL_NAMES = [
     "Human", "01-ai", "BigCode", "DeepSeek", "Gemma", "Phi", 
     "Llama", "Granite", "Mistral", "Qwen", "OpenAI"
 ]
 
-# --- PERCORSI AGGIORNATI BASATI SULLA TUA STRUTTURA ---
-# Troviamo la root del progetto dinamicamente
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Risaliamo: src/src_TaskB -> src -> Sem-Eval-2026-Task-13
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
-
-# Percorsi corretti (aggiunto "results/" extra)
 BINARY_CKPT = os.path.join(PROJECT_ROOT, "results/results_TaskB/checkpoints/binary")
 FAMILIES_CKPT = os.path.join(PROJECT_ROOT, "results/results_TaskB/checkpoints/families")
 TEST_FILE = os.path.join(PROJECT_ROOT, "data/Task_B/test_sample.parquet")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "results/results_TaskB/inference_output")
 
-# Configurazioni Modello (Devono matchare il config.yaml del training)
 BINARY_CFG = {
     "model": {"model_name": "microsoft/codebert-base", "num_labels": 2, "use_lora": False}
 }
@@ -50,56 +37,25 @@ FAMILIES_CFG = {
     "model": {"model_name": "microsoft/unixcoder-base", "num_labels": 10, "use_lora": True, "lora_r": 64}
 }
 
-class InferenceDataset(Dataset):
-    def __init__(self, dataframe, tokenizer, max_length=512):
-        self.data = dataframe.reset_index(drop=True)
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        code = str(self.data.at[idx, 'code'])
-        label = -1
-        if 'label' in self.data.columns:
-            val = self.data.at[idx, 'label']
-            if pd.notna(val):
-                label = int(val)
-        
-        encoding = self.tokenizer(
-            code, truncation=True, padding="max_length", max_length=self.max_length, return_tensors="pt"
-        )
-        return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "label": label
-        }
-
 def load_trained_model(checkpoint_dir, config, device, mode_name="Model"):
     logger.info(f"[{mode_name}] Loading from {checkpoint_dir}...")
     
     if not os.path.exists(checkpoint_dir):
-        # Debug helper: stampa cosa vede Python
         logger.error(f"PATH ERROR: {checkpoint_dir} does not exist.")
         raise FileNotFoundError(f"Directory not found: {checkpoint_dir}")
 
-    # 1. Init Architettura
     model = CodeClassifier(config)
     model.to(device)
     
     is_peft = config["model"]["use_lora"]
     
     if is_peft:
-        # --- CARICAMENTO LORA ---
         try:
             model.base_model.load_adapter(checkpoint_dir, adapter_name="default")
             logger.info(f"[{mode_name}] LoRA Adapters loaded successfully.")
         except Exception as e:
-             # A volte PEFT salva dentro una sottocartella, controlliamo
              raise RuntimeError(f"[{mode_name}] Failed to load LoRA: {e}")
 
-        # Carica componenti custom
         custom_path = os.path.join(checkpoint_dir, "custom_components.pt")
         if os.path.exists(custom_path):
             state = torch.load(custom_path, map_location=device)
@@ -110,7 +66,6 @@ def load_trained_model(checkpoint_dir, config, device, mode_name="Model"):
             logger.warning(f"[{mode_name}] custom_components.pt missing. Using random init for heads.")
 
     else:
-        # --- CARICAMENTO FULL MODEL ---
         full_path = os.path.join(checkpoint_dir, "full_model.bin")
         if not os.path.exists(full_path):
              fallback = os.path.join(checkpoint_dir, "pytorch_model.bin")
@@ -129,7 +84,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Running Inference on {device}")
     
-    # Crea output dir
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     if not os.path.exists(TEST_FILE):
@@ -139,7 +93,6 @@ def main():
     df = pd.read_parquet(TEST_FILE)
     logger.info(f"Loaded {len(df)} samples from {TEST_FILE}")
 
-    # --- STEP A: BINARY ---
     logger.info(">>> STEP A: Binary Classification")
     tok_bin = AutoTokenizer.from_pretrained(BINARY_CFG["model"]["model_name"])
     ds_bin = InferenceDataset(df, tok_bin)
@@ -161,7 +114,6 @@ def main():
 
     is_ai_preds = [1 if p > 0.5 else 0 for p in is_ai_probs]
     
-    # --- STEP B: FAMILIES ---
     logger.info(">>> STEP B: AI Family Attribution")
     ai_indices = [i for i, x in enumerate(is_ai_preds) if x == 1]
     final_preds_map = {} 
@@ -192,17 +144,15 @@ def main():
         del model_fam
         torch.cuda.empty_cache()
 
-    # --- ASSEMBLING ---
     final_predictions = []
     ground_truth = df['label'].tolist() if 'label' in df.columns else []
     
     for i in range(len(df)):
         if is_ai_preds[i] == 0:
-            final_predictions.append(0) # Human
+            final_predictions.append(0)
         else:
-            final_predictions.append(final_preds_map.get(i, 1)) # Default fallback if error
+            final_predictions.append(final_preds_map.get(i, 1))
 
-    # --- REPORT ---
     if len(ground_truth) > 0:
         labels_present = sorted(list(set(ground_truth) | set(final_predictions)))
         target_names = [LABEL_NAMES[i] for i in labels_present]

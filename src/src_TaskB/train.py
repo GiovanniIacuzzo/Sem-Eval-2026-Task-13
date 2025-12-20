@@ -13,10 +13,8 @@ from sklearn.metrics import confusion_matrix
 from comet_ml import Experiment
 from transformers import AutoTokenizer
 
-# --- FIX SICUREZZA PYTORCH (CRUCIALE se non hai aggiornato torch) ---
 import transformers.utils.import_utils
 transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
-# --------------------------------------------------------------------
 
 from src.src_TaskB.models.model import CodeClassifier
 from src.src_TaskB.dataset.dataset import load_data
@@ -36,7 +34,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Etichette (Binary: 0=Human, 1=AI)
 LABELS_BINARY = ["Human", "AI"]
 LABELS_FAMILIES = [
     "01-ai", "BigCode", "DeepSeek", "Gemma", "Phi", 
@@ -51,7 +48,6 @@ class ConsoleUX:
     @staticmethod
     def log_metrics(stage, metrics):
         log_str = f"[{stage}] "
-        # Priorità visiva: F1 Macro > Accuracy > Loss
         keys = ["f1_macro", "f1_weighted", "accuracy", "loss"] + \
                [k for k in metrics.keys() if k not in ["f1_macro", "f1_weighted", "accuracy", "loss"] and "cls" not in k]
         
@@ -69,14 +65,11 @@ def save_checkpoint(model, path, is_peft=False):
     os.makedirs(path, exist_ok=True)
     logger.info(f"Saving model to {path}...")
     
-    # 1. Salva Tokenizer
     model.tokenizer.save_pretrained(path)
 
     if is_peft:
-        # A. Salva gli adapter LoRA
         model.base_model.save_pretrained(path)
         
-        # B. Salva le componenti Custom
         custom_state = {
             'classifier': model.classifier.state_dict(),
             'pooler': model.pooler.state_dict(),
@@ -85,11 +78,10 @@ def save_checkpoint(model, path, is_peft=False):
         }
         torch.save(custom_state, os.path.join(path, "custom_components.pt"))
     else:
-        # Full model save
         torch.save(model.state_dict(), os.path.join(path, "full_model.bin"))
 
 # -----------------------------------------------------------------------------
-# Training Routine
+# Training
 # -----------------------------------------------------------------------------
 def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, 
                    epoch_idx, total_epochs, accumulation_steps=1):
@@ -104,7 +96,6 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
     len_dataloader = len(dataloader)
     
     for step, batch in enumerate(progress_bar):
-        # Spostamento su GPU
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
@@ -113,13 +104,11 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         if lang_ids is not None:
             lang_ids = lang_ids.to(device, non_blocking=True)
         
-        # DANN Alpha Scheduling
         current_step = step + epoch_idx * len_dataloader
         total_steps = total_epochs * len_dataloader
         p = float(current_step) / (total_steps + 1e-8)
         alpha = 2. / (1. + np.exp(-10 * p)) - 1
         
-        # Mixed Precision Context
         with autocast(device_type='cuda', dtype=torch.float16):
             logits, loss = model(
                 input_ids, 
@@ -130,7 +119,6 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
             )
             loss = loss / accumulation_steps
 
-        # Backward
         scaler.scale(loss).backward()
 
         if (step + 1) % accumulation_steps == 0:
@@ -144,7 +132,6 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
             if scheduler is not None:
                 scheduler.step()
         
-        # Logging
         current_loss = loss.item() * accumulation_steps
         running_loss += current_loss
         
@@ -154,19 +141,16 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
             "LR": f"{scheduler.get_last_lr()[0]:.1e}"
         })
 
-        # Raccolta metriche
         preds = torch.argmax(logits, dim=1).detach().cpu().numpy()
         labels_cpu = labels.detach().cpu().numpy()
         predictions.extend(preds)
         references.extend(labels_cpu)
 
-    # Calcolo metriche fine epoca
     if hasattr(model, 'compute_metrics'):
         metrics = model.compute_metrics(predictions, references)
     else:
         metrics = {"accuracy": 0.0}
     
-    # FIX SINTASSI QUI:
     metrics["loss"] = running_loss / len_dataloader
     
     return metrics
@@ -186,7 +170,6 @@ if __name__ == "__main__":
     
     set_seed(42)
 
-    # 1. Load Config
     if not os.path.exists(args.config):
         logger.error(f"Config file not found: {args.config}")
         sys.exit(1)
@@ -217,7 +200,6 @@ if __name__ == "__main__":
     
     current_label_names = LABELS_BINARY if args.mode == "binary" else LABELS_FAMILIES
 
-    # 2. Experiment Tracking
     experiment = Experiment(
         api_key=os.getenv("COMET_API_KEY"),
         project_name=os.getenv("COMET_PROJECT_NAME"),
@@ -227,7 +209,6 @@ if __name__ == "__main__":
     experiment.add_tag(args.mode)
     experiment.log_parameters(mode_config)
 
-    # 3. Device Setup
     if not torch.cuda.is_available():
         logger.warning("CUDA not found! Training will be slow.")
         device = torch.device("cpu")
@@ -235,12 +216,10 @@ if __name__ == "__main__":
         device = torch.device("cuda")
         logger.info(f"GPU Active: {torch.cuda.get_device_name(0)}")
     
-    # 4. Tokenizer Init
     model_name = mode_config["model_name"]
     logger.info(f"Loading Tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # 5. Data Loading
     logger.info(f"Loading Data for mode: {args.mode}...")
     train_dataset, val_dataset, class_weights = load_data(final_config, tokenizer, mode=args.mode)
     
@@ -268,7 +247,6 @@ if __name__ == "__main__":
         pin_memory=True
     )
 
-    # 6. Model Init
     logger.info(f"Initializing Model ({args.mode})...")
     model_wrapper = CodeClassifier(final_config, class_weights=class_weights)
     model_wrapper.to(device)
@@ -279,7 +257,6 @@ if __name__ == "__main__":
         all_params = sum(p.numel() for p in model_wrapper.parameters())
         logger.info(f"LoRA Active. Trainable: {trainable_params:,} ({100 * trainable_params / all_params:.2f}%)")
 
-    # 7. Optimization
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model_wrapper.parameters()), 
         lr=float(mode_config["learning_rate"]),
@@ -299,7 +276,6 @@ if __name__ == "__main__":
         pct_start=0.1
     )
 
-    # 8. Training Loop
     best_f1 = float("-inf")
     patience = mode_config.get("early_stop_patience", 4)
     patience_counter = 0
@@ -312,34 +288,25 @@ if __name__ == "__main__":
     for epoch in range(num_epochs):
         ConsoleUX.print_banner(f"Epoch {epoch+1}/{num_epochs}")
 
-        # --- TRAIN ---
         train_metrics = train_one_epoch(
             model_wrapper, train_dl, optimizer, scheduler, scaler, device, 
             epoch, num_epochs, acc_steps
         )
         ConsoleUX.log_metrics("Train", train_metrics)
         experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
-        
-        # --- VALIDATE ---
         torch.cuda.empty_cache() 
         
-        # NOTA: Qui assumo che il tuo utils.evaluate restituisca 3 o 4 valori.
-        # Se utils.py restituisce solo (metrics, preds, refs), rimuovi ", val_report"
-        # Per sicurezza, uso solo i primi 3 se il report non ti serve o se utils è vecchio.
-        # Se hai aggiornato utils.py per restituire 4 valori, mantieni la riga sotto:
         try:
             val_metrics, val_preds, val_refs, val_report = evaluate(
                 model_wrapper, val_dl, device, label_names=current_label_names
             )
         except ValueError:
-            # Fallback se evaluate ne restituisce solo 3
             val_metrics, val_preds, val_refs = evaluate(model_wrapper, val_dl, device)
             val_report = "Report not available"
         
         ConsoleUX.log_metrics("Valid", val_metrics)
         experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
 
-        # Checkpointing
         current_f1 = val_metrics.get("f1_macro", 0.0)
         
         if current_f1 > best_f1:

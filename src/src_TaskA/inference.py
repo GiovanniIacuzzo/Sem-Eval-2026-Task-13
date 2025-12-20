@@ -6,7 +6,6 @@ import torch
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix, classification_report
@@ -14,7 +13,6 @@ from torch.amp import autocast
 from dotenv import load_dotenv
 from typing import List, Dict, Tuple
 
-# Importa PEFT per gestire LoRA
 from peft import PeftModel
 
 from src_TaskA.models.model import CodeClassifier
@@ -45,7 +43,7 @@ class ConsoleUX:
         logger.info(log_str.strip(" | "))
 
 # -----------------------------------------------------------------------------
-# Advanced Model Loading Logic (FIXED)
+# Model Loading
 # -----------------------------------------------------------------------------
 def load_model_for_inference(config_path: str, checkpoint_dir: str, device: torch.device):
     """
@@ -57,20 +55,14 @@ def load_model_for_inference(config_path: str, checkpoint_dir: str, device: torc
         config = yaml.safe_load(f)
 
     logger.info("Initializing Model Architecture...")
-    # Inizializza il modello vuoto (pesi random per le teste)
     model = CodeClassifier(config)
     
-    # Paths possibili
-    # Caso A: LoRA (Adapter + Heads separate)
     adapter_path = os.path.join(checkpoint_dir)
     heads_path = os.path.join(checkpoint_dir, "heads.pt")
     
-    # Caso B: Full Model
-    # PRIORITÀ AL NUOVO NOME DEL FILE
     new_model_path = os.path.join(checkpoint_dir, "best_model_taskA.pt")
     old_model_path = os.path.join(checkpoint_dir, "best_model.pt")
 
-    # Verifica presenza LoRA
     is_lora = os.path.exists(os.path.join(checkpoint_dir, "adapter_config.json"))
     
     if is_lora:
@@ -79,26 +71,20 @@ def load_model_for_inference(config_path: str, checkpoint_dir: str, device: torc
         
         if os.path.exists(heads_path):
             logger.info(f"Loading custom heads from {heads_path}...")
-            # weights_only=False necessario per i dizionari complessi
             heads_state = torch.load(heads_path, map_location=device, weights_only=False)
             
-            # Caricamento flessibile per evitare crash se mancano pezzi non critici
             if 'classifier' in heads_state:
                 model.classifier.load_state_dict(heads_state['classifier'])
             if 'pooler' in heads_state:
                 model.pooler.load_state_dict(heads_state['pooler'])
             if 'projection' in heads_state:
                 model.projection_head.load_state_dict(heads_state['projection'])
-            
-            # Non carichiamo il language_classifier in inferenza se dà errori di size
-            # tanto non serve per predire Human vs AI
         else:
             logger.warning(f"Heads file ({heads_path}) NOT FOUND! Using random weights for classifier.")
             
     elif os.path.exists(new_model_path):
         logger.info(f"Loading NEW Full Fine-Tuned model from {new_model_path}")
         state_dict = torch.load(new_model_path, map_location=device, weights_only=False)
-        # strict=False per ignorare eventuali layer DANN vecchi che non matchano
         model.load_state_dict(state_dict, strict=False)
         
     elif os.path.exists(old_model_path):
@@ -124,7 +110,6 @@ def run_inference(
     batch_size: int = 32
 ) -> Tuple[List[int], List[int], Dict[str, float]]:
     
-    # Dataset senza augmentation
     dataset = CodeDataset(
         dataframe=test_df,
         tokenizer=model_wrapper.tokenizer,
@@ -154,7 +139,6 @@ def run_inference(
             labels = batch["labels"].to(device, non_blocking=True)
 
             with autocast(device_type=device_type, dtype=dtype):
-                # Alpha=0.0 disattiva DANN
                 logits, _ = model_wrapper(input_ids, attention_mask, alpha=0.0)
 
             preds = torch.argmax(logits, dim=1)
@@ -189,22 +173,18 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     ConsoleUX.print_banner("SemEval Task 13 - Robust Inference")
 
-    # 1. Config
-    CONFIG_PATH = "src_TaskA/config/config.yaml"
-    CHECKPOINT_DIR = "results_TaskA/checkpoints" 
+    CONFIG_PATH = "src/src_TaskA/config/config.yaml"
+    CHECKPOINT_DIR = "results/results_TaskA/checkpoints" 
 
-    # 2. Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
-    # 3. Load Model
     try:
         model = load_model_for_inference(CONFIG_PATH, CHECKPOINT_DIR, device)
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         sys.exit(1)
 
-    # 4. Load Data
     TEST_FILE = "data/Task_A/test_sample.parquet"
     if not os.path.exists(TEST_FILE):
         logger.warning(f"{TEST_FILE} not found. Trying validation set...")
@@ -217,10 +197,8 @@ if __name__ == "__main__":
     logger.info(f"Loading data from: {TEST_FILE}")
     test_df = load_and_preprocess(TEST_FILE)
 
-    # 5. Run
     preds, refs, metrics = run_inference(model, test_df, device)
     
-    # 6. Results
     ConsoleUX.log_metrics(metrics)
     print("\n" + classification_report(refs, preds, target_names=["Human", "AI"]))
     save_artifacts(preds, refs, "results_TaskA/inference_output")

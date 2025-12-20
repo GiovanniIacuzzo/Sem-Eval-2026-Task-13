@@ -6,7 +6,6 @@ import torch
 import numpy as np
 import argparse
 import gc
-import pandas as pd
 from torch.utils.data import DataLoader
 from torch.amp import autocast
 from torch.cuda.amp import GradScaler
@@ -16,7 +15,6 @@ from sklearn.model_selection import StratifiedKFold
 from transformers import AutoTokenizer
 from comet_ml import Experiment
 
-# --- IMPORTS AGGIORNATI ---
 from src.src_TaskC.models.model import CodeClassifier
 from src.src_TaskC.dataset.dataset import CodeDataset, load_data_for_kfold, get_dynamic_language_map, get_class_weights
 from src.src_TaskC.utils.utils import evaluate
@@ -54,7 +52,7 @@ class ConsoleUX:
         logger.info(log_str.strip(" | "))
 
 # -----------------------------------------------------------------------------
-# Training Routine Single Epoch
+# Training Routine
 # -----------------------------------------------------------------------------
 def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, 
                    epoch_idx, total_epochs, accumulation_steps=1):
@@ -74,7 +72,6 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         labels = batch["labels"].to(device, non_blocking=True)
         lang_ids = batch["lang_ids"].to(device, non_blocking=True)
         
-        # Annealing per DANN
         current_step = step + epoch_idx * len_dataloader
         total_steps = total_epochs * len_dataloader
         p = float(current_step) / total_steps
@@ -118,7 +115,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
     return metrics
 
 # -----------------------------------------------------------------------------
-# Main Execution (K-FOLD LEAKAGE FREE - OFFLINE MODE)
+# Main Execution
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
@@ -129,20 +126,19 @@ if __name__ == "__main__":
     parser.add_argument("--k_folds", type=int, default=5, help="Number of CV folds")
     args = parser.parse_args()
 
-    # --- 1. DATA PATH SETUP (OFFLINE) ---
+    # --- 1. DATA PATH SETUP ---
     DATA_ROOT = os.getenv("DATA_PATH", "./data")
     task_data_dir = os.path.join(DATA_ROOT, "Task_C")
     
-    # Verifica che i dati esistano davvero
     train_file = os.path.join(task_data_dir, "train.parquet")
     val_file = os.path.join(task_data_dir, "validation.parquet")
 
     if not os.path.exists(train_file):
-        logger.error(f"❌ DATA NOT FOUND! Expected 'train.parquet' in: {task_data_dir}")
+        logger.error(f"DATA NOT FOUND! Expected 'train.parquet' in: {task_data_dir}")
         logger.error("Please ensure you have downloaded the data into the './data/Task_C/' folder.")
         sys.exit(1)
     
-    logger.info(f"📂 Data Source: {task_data_dir}")
+    logger.info(f"Data Source: {task_data_dir}")
     
     config_path = args.config
     if not os.path.exists(config_path):
@@ -152,7 +148,6 @@ if __name__ == "__main__":
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
-    # Aggiorniamo i path nel config con quelli verificati
     config["data"]["train_path"] = train_file
     config["data"]["val_path"] = val_file
 
@@ -160,27 +155,21 @@ if __name__ == "__main__":
     logger.info(f"Compute Device: {device}")
 
     # =========================================================================
-    # 2. SETUP DATA (PANDAS ONLY)
+    # 2. SETUP DATA
     # =========================================================================
-    # Carichiamo il DataFrame completo SENZA creare ancora i Dataset PyTorch
     full_df = load_data_for_kfold(config)
     
-    # Generiamo la mappa lingue dinamica per evitare crash della DANN
     language_map = get_dynamic_language_map(full_df)
-    config["model"]["num_languages"] = len(language_map) # Aggiorna config
+    config["model"]["num_languages"] = len(language_map)
     
-    # Carichiamo il tokenizer in modo ottimizzato
     model_name = config["model"]["model_name"]
     logger.info(f"Loading Tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # Prepariamo Labels per StratifiedKFold
     y_all = full_df['label'].values
     
-    # Setup K-Fold
     kf = StratifiedKFold(n_splits=args.k_folds, shuffle=True, random_state=42)
     
-    # Setup Comet
     experiment = Experiment(
         api_key=os.getenv("COMET_API_KEY"),
         project_name=os.getenv("COMET_PROJECT_NAME", "semeval-task13-subtaskc"),
@@ -195,35 +184,30 @@ if __name__ == "__main__":
     for fold, (train_idx, val_idx) in enumerate(kf.split(np.zeros(len(y_all)), y_all)):
         ConsoleUX.print_banner(f"FOLD {fold+1}/{args.k_folds}")
         
-        # A. Split Pandas DataFrame
         train_df_fold = full_df.iloc[train_idx]
         val_df_fold = full_df.iloc[val_idx]
         
-        # B. Calcolo Pesi Solo sul Train Fold (No Leakage)
         class_weights = get_class_weights(train_df_fold, device)
         
-        # C. Creazione Dataset PyTorch (Augmentation differenziata)
         logger.info(f"Creating Datasets for Fold {fold+1}...")
         train_dataset = CodeDataset(
             dataframe=train_df_fold, 
             tokenizer=tokenizer, 
             language_map=language_map,
             max_length=config["data"]["max_length"], 
-            augment=True  # Sì rumore per training
+            augment=True
         )
         val_dataset = CodeDataset(
             dataframe=val_df_fold, 
             tokenizer=tokenizer, 
             language_map=language_map,
             max_length=config["data"]["max_length"], 
-            augment=False # Dati puliti per validazione
+            augment=False
         )
         logger.info(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
 
-        # D. Inizializzazione Modello e Dataloaders
         model = CodeClassifier(config, class_weights=class_weights)
         
-        # Ridimensionamento DANN Head se necessario
         if model.num_languages != len(language_map):
             logger.info(f"Adjusting DANN head to {len(language_map)} languages.")
             import torch.nn as nn
@@ -260,14 +244,12 @@ if __name__ == "__main__":
         save_dir = config["training"]["checkpoint_dir"]
         os.makedirs(save_dir, exist_ok=True)
 
-        # E. Training Loop
         for epoch in range(num_epochs):
             train_metrics = train_one_epoch(
                 model, train_dl, optimizer, scheduler, scaler, device, 
                 epoch, num_epochs, acc_steps
             )
             
-            # Valutazione
             val_metrics, val_preds, val_refs = evaluate(model, val_dl, device, verbose=False)
             
             ConsoleUX.log_metrics(f"F{fold+1}-Ep{epoch+1}", val_metrics)
@@ -276,7 +258,7 @@ if __name__ == "__main__":
             experiment.log_metrics(val_metrics, prefix=f"Fold{fold}_Val", step=epoch)
 
             if val_metrics["f1"] > best_fold_f1:
-                logger.info(f"⭐ New Best F1 for Fold {fold+1}: {val_metrics['f1']:.4f}")
+                logger.info(f"New Best F1 for Fold {fold+1}: {val_metrics['f1']:.4f}")
                 best_fold_f1 = val_metrics["f1"]
                 patience_counter = 0
                 
@@ -295,7 +277,6 @@ if __name__ == "__main__":
                 logger.info(f"Early stopping fold {fold+1}")
                 break
 
-        # Cleanup
         del model, optimizer, scheduler, scaler, train_dl, val_dl, train_dataset, val_dataset
         torch.cuda.empty_cache()
         gc.collect()

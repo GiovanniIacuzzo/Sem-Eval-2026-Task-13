@@ -4,7 +4,7 @@ import logging
 import pandas as pd
 import torch
 import numpy as np
-from typing import Tuple, List, Dict, Optional
+from typing import Dict
 from torch.utils.data import Dataset
 from sklearn.utils.class_weight import compute_class_weight
 
@@ -20,7 +20,7 @@ if not logger.handlers:
     logger.addHandler(ch)
 
 # -----------------------------------------------------------------------------
-# PyTorch Dataset Class
+# Dataset Class
 # -----------------------------------------------------------------------------
 class CodeDataset(Dataset):
     """
@@ -51,9 +51,9 @@ class CodeDataset(Dataset):
         lines = code.split('\n')
         new_lines = []
         for line in lines:
-            if random.random() < 0.05: new_lines.append("") # Empty line
-            if random.random() < 0.05: line = line + " " * random.randint(1, 3) # Trailing space
-            if random.random() < 0.01: line = " " + line # Bad indent
+            if random.random() < 0.05: new_lines.append("")
+            if random.random() < 0.05: line = line + " " * random.randint(1, 3)
+            if random.random() < 0.01: line = " " + line
             new_lines.append(line)
         return "\n".join(new_lines)
 
@@ -63,20 +63,16 @@ class CodeDataset(Dataset):
         label = int(row["label"]) 
         lang_str = str(row["language"]).lower()
         
-        # Gestione robusta per lingue sconosciute (-1 sarà ignorato dalla Loss DANN)
         lang_id = self.language_map.get(lang_str, -1)
         
-        # 1. Augmentation (SOLO se augment=True, gestito dal main loop)
         if self.augment:
             code = self._structural_noise(code)
-            # Random Crop se troppo lungo
             if len(code) > self.max_length * 4:
                 max_start = len(code) - int(self.max_length * 3.5)
                 if max_start > 0:
                     start = random.randint(0, max_start)
                     code = code[start : start + int(self.max_length * 4)]
 
-        # 2. Tokenization
         encoding = self.tokenizer(
             code,
             truncation=True,
@@ -111,7 +107,7 @@ def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataF
         
     df['language'] = df['language'].str.lower()
     df = df.dropna(subset=['code']).reset_index(drop=True)
-    df = df[df['code'].str.len() > 15].copy() # Filtro rumore minimo
+    df = df[df['code'].str.len() > 15].copy()
     df['code'] = df['code'].str.slice(0, max_code_chars)
     return df
 
@@ -142,7 +138,7 @@ def get_dynamic_language_map(df: pd.DataFrame) -> Dict[str, int]:
     return lang_map
 
 # -----------------------------------------------------------------------------
-# NEW: K-Fold Hook
+# K-Fold Hook
 # -----------------------------------------------------------------------------
 def load_data_for_kfold(config: dict) -> pd.DataFrame:
     """
@@ -157,10 +153,8 @@ def load_data_for_kfold(config: dict) -> pd.DataFrame:
     df_train = load_and_preprocess(train_path)
     df_val = load_and_preprocess(val_path)
     
-    # Unione completa
     full_df = pd.concat([df_train, df_val]).reset_index(drop=True)
     
-    # Bilanciamento Globale
     samples_cap = config["data"].get("samples_per_lang", 4000)
     if config["data"].get("balance_languages", True):
         full_df = balance_languages(full_df, target_samples=samples_cap)
@@ -169,15 +163,13 @@ def load_data_for_kfold(config: dict) -> pd.DataFrame:
     return full_df
 
 # -----------------------------------------------------------------------------
-# Legacy Loader (Optional, for quick checks without K-Fold)
+# Legacy Loader
 # -----------------------------------------------------------------------------
 def load_data(config: dict, tokenizer, device=torch.device("cpu")):
-    # Usa la logica unificata anche qui
     full_df = load_data_for_kfold(config)
     lang_map = get_dynamic_language_map(full_df)
     weights = get_class_weights(full_df, device)
     
-    # Split manuale 80/20 se si usa questa funzione legacy
     mask = np.random.rand(len(full_df)) < 0.8
     train_df = full_df[mask]
     val_df = full_df[~mask]

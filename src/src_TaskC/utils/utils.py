@@ -10,7 +10,7 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# Metric Computation (POTENZIATO PER TASK C)
+# Metric Computation
 # -----------------------------------------------------------------------------
 def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
     """
@@ -20,7 +20,6 @@ def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
     preds = np.array(preds)
     labels = np.array(labels)
 
-    # 1. Metriche Globali
     accuracy = accuracy_score(labels, preds)
     precision, recall, f1, _ = precision_recall_fscore_support(
         labels, preds, average='macro', zero_division=0
@@ -33,14 +32,10 @@ def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
         "recall": float(recall)
     }
 
-    # 2. Metriche Per-Classe (Cruciale per il debugging)
-    # average=None restituisce un array con i punteggi per ogni classe
     _, _, f1_per_class, _ = precision_recall_fscore_support(
         labels, preds, average=None, zero_division=0
     )
 
-    # Assumiamo 4 classi: 0, 1, 2, 3
-    # Mappale mentalmente a: 0=Human, 1=AI, 2=Hybrid, 3=Adversarial (o come da tuo dataset)
     for i, score in enumerate(f1_per_class):
         metrics[f"f1_class_{i}"] = float(score)
 
@@ -53,7 +48,7 @@ def evaluate(
     model: torch.nn.Module, 
     dataloader: torch.utils.data.DataLoader, 
     device: torch.device,
-    verbose: bool = False # Opzione per stampare il report completo
+    verbose: bool = False
 ) -> Tuple[Dict[str, float], List[int], List[int]]:
     
     model.eval()
@@ -63,11 +58,10 @@ def evaluate(
 
     progress_bar = tqdm(dataloader, desc="Evaluating", leave=False, dynamic_ncols=True)
 
-    # Setup device type per autocast
     if device.type == 'cuda':
         device_type = 'cuda'
         dtype = torch.float16
-    elif device.type == 'mps': # Mac M1/M2/M3
+    elif device.type == 'mps':
         device_type = 'mps'
         dtype = torch.float16
     else:
@@ -79,11 +73,9 @@ def evaluate(
             input_ids      = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels         = batch["labels"].to(device, non_blocking=True)
-            # Passiamo anche lang_ids per coerenza, anche se con alpha=0 viene ignorato
             lang_ids       = batch["lang_ids"].to(device, non_blocking=True)
             
             with autocast(device_type=device_type, dtype=dtype):
-                # alpha=0.0 disabilita DANN durante la validazione
                 logits, loss = model.forward(
                     input_ids, 
                     attention_mask, 
@@ -100,14 +92,11 @@ def evaluate(
             predictions.extend(preds.detach().cpu().numpy())
             references.extend(labels.detach().cpu().numpy())
             
-            # Pulizia immediata
             del input_ids, attention_mask, labels, lang_ids, logits, loss
 
-    # Calcolo metriche
     eval_metrics = compute_metrics(predictions, references)
     eval_metrics["loss"] = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
     
-    # Stampa report dettagliato solo se richiesto (utile a fine epoch)
     if verbose:
         report = classification_report(
             references, predictions, 
@@ -116,7 +105,6 @@ def evaluate(
         )
         logger.info(f"\nClassification Report:\n{report}")
 
-    # Pulizia memoria finale
     if device.type == 'cuda':
         torch.cuda.empty_cache()
     elif device.type == 'mps':

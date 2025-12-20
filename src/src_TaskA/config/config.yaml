@@ -1,25 +1,11 @@
-# ==========================================
-# SemEval 2026 Task 13 - Subtask A Config
-# Optimized for NVIDIA T4 (16GB VRAM)
-# Strategy: Boosted LoRA (r=64) + DANN + SupCon
-# ==========================================
-
 # ---------------------
 # Dataset Configuration
 # ---------------------
 data:
   train_path: "data/Task_A/train.parquet"
   val_path: "data/Task_A/validation.parquet"
-  
-  # CRUCIALE: 512 tokens.
-  # Catturiamo abbastanza contesto per vedere pattern strutturali 
-  # (import, main loops, error handling) che distinguono AI da Umani.
   max_length: 512
-  
-  # Bilanciamento
   balance_languages: True
-  # Downsampling aggressivo. Se hai 20k Python e 2k Ruby, 
-  # il modello ignorerà Ruby. Tagliamo Python a 6000.
   samples_per_lang: 6000 
 
 # ---------------------
@@ -28,17 +14,8 @@ data:
 model:
   model_name: "microsoft/unixcoder-base"
   num_labels: 2 
-  
-  # --- LoRA Optimization ---
   use_lora: true 
-  
-  # Aumentato a 0.15 per favorire OOD (Generalizzazione)
   extra_dropout: 0.15 
-  
-  # --- DANN Targets (Lista Estesa) ---
-  # Più è varia questa lista, più l'encoder deve imparare 
-  # feature "Language-Agnostic" per ingannare il discriminatore.
-  # Abbiamo aggiunto Rust, Kotlin, Swift, TS per coprire paradigmi moderni.
   languages:
     - python
     - java
@@ -59,40 +36,23 @@ model:
 # Training Hyperparameters
 # ---------------------
 training:
-  output_dir: "./results_TaskA"
-  checkpoint_dir: "./results_TaskA/checkpoints"
-  log_dir: "./results_TaskA/logs"
-  
-  # Strategia "Slow & Steady" per DANN + SupCon
+  output_dir: "./results/results_TaskA"
+  checkpoint_dir: "./results/results_TaskA/checkpoints"
+  log_dir: "./results/results_TaskA/logs"
   num_epochs: 15
   early_stop_patience: 5
-  
-  # --- Memory Strategy T4 (CRUCIALE) ---
-  # Batch 64 fisico esplode su T4 (16GB). 
-  # Usiamo 16 fisico * 4 accumulo = 64 Effettivo.
-  # La SupCon loss lavorerà matematicamente su batch da 64.
   batch_size: 16
   gradient_accumulation_steps: 4
-  
-  # --- Learning Rate ---
-  # Con LoRA r=64 (nel codice model.py) abbiamo più parametri.
-  # 3e-4 è il punto dolce.
   learning_rate: 0.0003
-  
   evaluation_metric: "f1"
   best_metric_lower_is_better: false
-  
   warmup_ratio: 0.1
   fp16: true
-  
-  # Label smoothing: riduce la sicurezza del modello su esempi ambigui,
-  # aiutando quando incontra linguaggi mai visti.
   label_smoothing: 0.05
 
 # ---------------------
 # Demo Mode
 # ---------------------
 demo:
-  # Imposta a 'false' per il training finale!
   active: false 
   fraction: 0.05

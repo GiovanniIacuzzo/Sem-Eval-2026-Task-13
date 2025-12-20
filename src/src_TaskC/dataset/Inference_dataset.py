@@ -1,4 +1,3 @@
-import torch
 import pandas as pd
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
@@ -40,12 +39,9 @@ class InferenceDataset(Dataset):
         """
         Retrieves a sample, tokenizes the code, and returns input tensors with the ID.
         """
-        # Explicit type casting to string ensures stability against mixed types (e.g., int/float IDs)
         code = str(self.data.loc[idx, "code"])
         id_val = str(self.data.loc[idx, self.id_col])
 
-        # Tokenization
-        # We use 'pt' (PyTorch tensors) return type directly.
         encoding = self.tokenizer(
             code,
             truncation=True,
@@ -54,12 +50,7 @@ class InferenceDataset(Dataset):
             return_tensors="pt"
         )
         
-        # Squeeze removes the batch dimension added by the tokenizer: (1, seq_len) -> (seq_len).
-        # The DataLoader will add the correct batch dimension later during collation.
         item = {key: val.squeeze(0) for key, val in encoding.items()}
-        
-        # Inject the ID into the dictionary. 
-        # Note: The DataLoader's default collate_fn handles strings by compiling them into a list.
         item["id"] = id_val
         
         return item

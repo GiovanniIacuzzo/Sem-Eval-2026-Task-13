@@ -5,14 +5,12 @@ import yaml
 import torch
 import numpy as np
 import zipfile
-import shutil
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torch.amp import autocast
 from torch.cuda.amp import GradScaler
 from dotenv import load_dotenv
-from copy import deepcopy
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix
 
 from comet_ml import Experiment
 
@@ -23,9 +21,9 @@ except ImportError:
     KAGGLE_AVAILABLE = False
     print("Warning: 'kaggle' library not found. Auto-download disabled.")
 
-from src_TaskA.models.model import CodeClassifier
-from src_TaskA.dataset.dataset import load_data
-from src_TaskA.utils.utils import evaluate
+from src.src_TaskA.models.model import CodeClassifier
+from src.src_TaskA.dataset.dataset import load_data
+from src.src_TaskA.utils.utils import evaluate
 
 # -----------------------------------------------------------------------------
 # Configuration & Setup
@@ -109,7 +107,6 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         labels = batch["labels"].to(device, non_blocking=True)
         lang_ids = batch["lang_ids"].to(device, non_blocking=True)
         
-        # DANN Alpha Scheduling (0 -> 1)
         current_step = step + epoch_idx * len_dataloader
         total_steps = total_epochs * len_dataloader
         p = float(current_step) / total_steps
@@ -163,7 +160,7 @@ if __name__ == "__main__":
     DATA_ROOT = os.getenv("DATA_PATH", "./data")
     task_data_dir = setup_kaggle_data(DATA_ROOT) 
     
-    config_path = "src_TaskA/config/config.yaml"
+    config_path = "src/src_TaskA/config/config.yaml"
     if not os.path.exists(config_path):
         logger.error(f"Config not found at {config_path}")
         sys.exit(1)
@@ -171,7 +168,6 @@ if __name__ == "__main__":
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
-    # Path discovery
     train_files = [f for f in os.listdir(task_data_dir) if "train" in f and f.endswith(".parquet")]
     val_files = [f for f in os.listdir(task_data_dir) if ("val" in f or "dev" in f) and f.endswith(".parquet")]
 
@@ -259,19 +255,17 @@ if __name__ == "__main__":
             best_f1 = val_metrics["f1"]
             patience_counter = 0
             
-            # --- SALVATAGGIO CRITICO AGGIORNATO ---
+            # --- SALVATAGGIO ---
             save_path = os.path.join(save_dir, "best_model_taskA.pt")
             
             if hasattr(model, "use_lora") and model.use_lora:
-                # 1. Salva LoRA Adapters
                 model.base_model.save_pretrained(save_dir)
                 
-                # 2. Salva TUTTE le Custom Heads (Incluso il POOLER!)
                 torch.save({
                     'classifier': model.classifier.state_dict(),
                     'projection': model.projection_head.state_dict(),
                     'language': model.language_classifier.state_dict(),
-                    'pooler': model.pooler.state_dict() # <--- AGGIUNTO QUESTO
+                    'pooler': model.pooler.state_dict()
                 }, os.path.join(save_dir, "heads.pt"))
             else:
                 torch.save(model.state_dict(), save_path)

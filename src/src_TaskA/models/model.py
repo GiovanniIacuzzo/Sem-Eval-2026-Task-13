@@ -5,7 +5,6 @@ from transformers import AutoTokenizer, AutoModel
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
-# Imports per Metric Learning e LoRA
 try:
     from pytorch_metric_learning import losses
     METRIC_LEARNING_AVAILABLE = True
@@ -20,7 +19,7 @@ except ImportError:
     PEFT_AVAILABLE = False
 
 # -----------------------------------------------------------------------------
-# 1. Gradient Reversal Layer (DANN)
+# 1. Gradient Reversal Layer
 # -----------------------------------------------------------------------------
 class GradientReversalFn(torch.autograd.Function):
     @staticmethod
@@ -36,9 +35,6 @@ class GradientReversalFn(torch.autograd.Function):
 # -----------------------------------------------------------------------------
 # 2. Attention Pooling
 # -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-# 2. Attention Pooling (FIXED FOR FP16)
-# -----------------------------------------------------------------------------
 class AttentionHead(nn.Module):
     """Pooling intelligente che impara quali token sono importanti."""
     def __init__(self, hidden_size, dropout_prob=0.1):
@@ -53,11 +49,8 @@ class AttentionHead(nn.Module):
     def forward(self, hidden_states, attention_mask):
         attn_scores = self.attn(hidden_states).squeeze(-1)
         
-        # --- FIX CRITICO PER FP16 ---
-        # In float16 il minimo è circa -65500. -1e9 causa crash.
-        # Usiamo il minimo valore possibile per il dtype corrente o -1e4 che è sicuro.
         if attn_scores.dtype == torch.float16:
-             min_val = -1e4 # -10.000 è sufficiente per azzerare la softmax
+             min_val = -1e4
         else:
              min_val = -1e9
 
@@ -67,7 +60,7 @@ class AttentionHead(nn.Module):
         return torch.sum(attn_weights.unsqueeze(-1) * hidden_states, dim=1)
 
 # -----------------------------------------------------------------------------
-# 3. Main Model Class
+# 3. Model Class
 # -----------------------------------------------------------------------------
 class CodeClassifier(nn.Module):
     def __init__(self, config):
@@ -81,7 +74,6 @@ class CodeClassifier(nn.Module):
         self.num_languages = len(self.target_languages)
         self.max_length = data_cfg.get("max_length", 512)
         
-        # --- Backbone & LoRA ---
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         base_model = AutoModel.from_pretrained(self.model_name)
         self.hidden_size = base_model.config.hidden_size
@@ -89,7 +81,7 @@ class CodeClassifier(nn.Module):
         self.use_lora = model_cfg.get("use_lora", True) and PEFT_AVAILABLE
         
         if self.use_lora:
-            print(f"🚀 Activating LoRA for {self.model_name}...")
+            print(f"Activating LoRA for {self.model_name}...")
             peft_config = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION, 
                 inference_mode=False, r=16, lora_alpha=32, lora_dropout=0.1,
@@ -103,7 +95,6 @@ class CodeClassifier(nn.Module):
         # --- Components ---
         self.pooler = AttentionHead(self.hidden_size)
         
-        # 1. Main Task Head (Classificatore)
         self.classifier = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.Mish(),
@@ -111,15 +102,12 @@ class CodeClassifier(nn.Module):
             nn.Linear(self.hidden_size, self.num_labels)
         )
         
-        # 2. Projection Head (Critica per Metric Learning)
-        # La Contrastive Loss lavora meglio su uno spazio proiettato (es. 128 dim)
         self.projection_head = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.ReLU(),
             nn.Linear(self.hidden_size, 128) 
         )
         
-        # 3. Adversarial Head (DANN)
         self.language_classifier = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size // 2),
             nn.ReLU(),
@@ -134,8 +122,6 @@ class CodeClassifier(nn.Module):
         self.ce_loss = nn.CrossEntropyLoss(label_smoothing=0.05)
         self.dann_loss = nn.CrossEntropyLoss(ignore_index=-1)
         
-        # PyTorch Metric Learning Implementation
-        # SupConLoss gestisce automaticamente i positivi (stessa label) e negativi
         if METRIC_LEARNING_AVAILABLE:
             self.supcon_loss = losses.SupConLoss(temperature=0.07)
         else:
@@ -150,37 +136,28 @@ class CodeClassifier(nn.Module):
                 nn.init.constant_(module.bias, 0)
 
     def forward(self, input_ids, attention_mask, lang_ids=None, labels=None, alpha=1.0):
-        # 1. Backbone
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
-        # Usa il pooler AttentionHead
         features = self.pooler(outputs.last_hidden_state, attention_mask)
 
-        # 2. Main Classification
         task_logits = self.classifier(features)
         
         loss = None
         if labels is not None:
-            # A. Classification Loss (Cross Entropy)
             loss_ce = self.ce_loss(task_logits, labels)
             
-            # B. Metric Learning Loss (SupCon)
             loss_scl = 0.0
             if self.supcon_loss is not None:
-                # Proiezione + Normalizzazione (Fondamentale per la loss coseno/SupCon)
                 proj_features = self.projection_head(features)
                 proj_features = F.normalize(proj_features, p=2, dim=1)
                 
-                # Calcolo della loss usando la libreria esterna
                 loss_scl = self.supcon_loss(proj_features, labels)
             
-            # C. DANN Loss (Adversarial)
             loss_dann = 0.0
             if lang_ids is not None and alpha > 0:
                 reversed_feats = GradientReversalFn.apply(features, alpha)
                 lang_logits = self.language_classifier(reversed_feats)
                 loss_dann = self.dann_loss(lang_logits, lang_ids)
             
-            # Weighted Sum
             loss = loss_ce + (self.contrastive_weight * loss_scl) + loss_dann
             
         return task_logits, loss

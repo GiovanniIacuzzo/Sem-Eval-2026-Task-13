@@ -1,32 +1,19 @@
-# =============================================================================
-# SemEval 2026 Task 13 - Subtask B Configuration
-# Optimized for NVIDIA T4 (16GB VRAM)
-# Strategy: Cascade (Binary Gatekeeper -> 10-Class Specialist)
-# =============================================================================
-
 # -----------------------------------------------------------------------------
-# COMMON CONFIGURATION (Base params, overwritten by specific modes)
+# COMMON CONFIGURATION
 # -----------------------------------------------------------------------------
 common:
-  # Paths
-  data_dir: "data/Task_B_Processed" # Dove prepare_datasets.py ha salvato i parquet
+  data_dir: "data/Task_B_Processed"
   output_dir: "results/results_TaskB"
   checkpoint_dir: "results/results_TaskB/checkpoints"
-  log_dir: "results/results_TaskB/logs"
-  
-  # Hardware & Training Defaults
+  log_dir: "results/results_TaskB/logs"  
   seed: 42
   fp16: true
-  num_workers: 4
-  
-  # Default Hyperparams
+  num_workers: 4  
   learning_rate: 2.0e-5
   warmup_ratio: 0.1
   weight_decay: 0.01
   gradient_accumulation_steps: 1
   max_grad_norm: 1.0
-  
-  # Default DANN Languages
   languages: ["python", "java", "cpp", "c", "cs", "javascript", "php", "ruby", "rust", "go", "typescript", "kotlin", "swift", "shell"]
 
 # -----------------------------------------------------------------------------
@@ -34,58 +21,40 @@ common:
 # Task: Human (0) vs AI (1)
 # -----------------------------------------------------------------------------
 binary:
-  # Model
-  model_name: "microsoft/codebert-base" # Leggero e veloce
-  num_labels: 2   # 0=Human, 1=AI
-  use_lora: false # CodeBERT full finetuning è gestibile su T4
-  
-  # Data
-  max_length: 512 # Qui 512 va bene, il modello è più piccolo
+  model_name: "microsoft/codebert-base"
+  num_labels: 2
+  use_lora: false
+  max_length: 512
   batch_size: 16
-  gradient_accumulation_steps: 2 # Effettivo 32
-  
-  # Training
-  num_epochs: 4 # Task facile, converge presto
+  gradient_accumulation_steps: 2
+  num_epochs: 4
   early_stop_patience: 2
-  class_weights: false # Dataset bilanciato in prepare_datasets
-  
-  # Loss Strategy
+  class_weights: false
   loss_weights:
     w_ce: 1.0
-    w_supcon: 0.1 # Poco utile qui
-    w_dann: 0.2   # Leggero aiuto per invarianza al linguaggio
+    w_supcon: 0.1
+    w_dann: 0.2
 
 # -----------------------------------------------------------------------------
 # MODE 2: FAMILIES (Specialist)
 # Task: Classify specific AI model (0-9)
 # -----------------------------------------------------------------------------
 families:
-  # Model
-  model_name: "microsoft/unixcoder-base" # Più potente per capire la struttura
-  num_labels: 10 # LE 10 FAMIGLIE AI. (Human è escluso)
-  
-  # LoRA (Heavy Duty)
+  model_name: "microsoft/unixcoder-base"
+  num_labels: 10
   use_lora: true
-  lora_r: 64      # Alto rank per catturare sfumature sottili
+  lora_r: 64
   lora_alpha: 128
   lora_dropout: 0.05
   target_modules: ["query", "value", "key", "dense"]
-  
-  # Data (T4 Optimization)
-  # Abbassiamo a 384 per alzare il Batch Size fisico.
-  # SupCon ha bisogno di tanti esempi per batch per funzionare bene!
   max_length: 384 
-  batch_size: 24   # Su T4 dovresti riuscire a fare 24 o 32 con LoRA
-  gradient_accumulation_steps: 1 # Accumulo meno importante del batch fisico qui
-  
-  # Training
+  batch_size: 24
+  gradient_accumulation_steps: 1
   num_epochs: 15
   early_stop_patience: 4
-  class_weights: true # CRUCIALE: Bilancia le classi rare (es. Granite)
-  learning_rate: 3.0e-4 # LoRA vuole un LR più alto del full finetuning
-  
-  # Loss Strategy
+  class_weights: true
+  learning_rate: 3.0e-4
   loss_weights:
     w_ce: 1.0
-    w_supcon: 0.8 # ALTO: Forza il clustering delle famiglie
-    w_dann: 0.5   # MEDIO: Rendi il modello cieco al linguaggio (Java/Python)
+    w_supcon: 0.8
+    w_dann: 0.5

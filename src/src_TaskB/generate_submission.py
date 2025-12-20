@@ -1,36 +1,28 @@
 import os
-import sys
 import logging
 import torch
 import pandas as pd
-import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
-# --- FIX SICUREZZA PYTORCH ---
 import transformers.utils.import_utils
 transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
-# -----------------------------
 
-# Local imports
 from src.src_TaskB.models.model import CodeClassifier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- PERCORSI DINAMICI ---
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
 
-# Percorsi
 BINARY_CKPT = os.path.join(PROJECT_ROOT, "results/results_TaskB/checkpoints/binary")
 FAMILIES_CKPT = os.path.join(PROJECT_ROOT, "results/results_TaskB/checkpoints/families")
 TEST_PATH = os.path.join(PROJECT_ROOT, "data/Task_B/test.parquet")
 SUBMISSION_DIR = os.path.join(PROJECT_ROOT, "results/results_TaskB/submission")
-SUBMISSION_FILE = os.path.join(SUBMISSION_DIR, "submission.csv")
+SUBMISSION_FILE = os.path.join(SUBMISSION_DIR, "submission_task_b.csv")
 
-# Configurazioni
 BINARY_CFG = {
     "model": {"model_name": "microsoft/codebert-base", "num_labels": 2, "use_lora": False}
 }
@@ -40,7 +32,7 @@ FAMILIES_CFG = {
 
 class SubmissionDataset(Dataset):
     def __init__(self, dataframe, tokenizer, max_length=512):
-        self.data = dataframe # DataFrame già resettato
+        self.data = dataframe
         self.tokenizer = tokenizer
         self.max_length = max_length
 
@@ -98,19 +90,15 @@ def main():
 
     df = pd.read_parquet(TEST_PATH)
     
-    # --- CRITICAL FIX: RESET INDEX ---
-    # Questo assicura che gli indici siano 0, 1, 2... N coerenti con il loop finale
     df = df.reset_index(drop=True)
     logger.info(f"Loaded {len(df)} test samples (Index Reset).")
     
-    # Verifica colonna ID per sottomissione
     id_col = 'id' if 'id' in df.columns else 'ID'
     if id_col not in df.columns:
         logger.warning("Colonna ID non trovata! Genero ID sequenziali.")
         df['id'] = df.index
         id_col = 'id'
 
-    # --- FASE 1: Binary ---
     logger.info(">>> FASE 1: Binary Classification")
     tok_bin = AutoTokenizer.from_pretrained(BINARY_CFG["model"]["model_name"])
     ds_bin = SubmissionDataset(df, tok_bin)
@@ -134,16 +122,13 @@ def main():
     num_ai = sum(is_ai_preds)
     logger.info(f"Human: {len(df) - num_ai}, AI: {num_ai}")
 
-    # --- FASE 2: Families ---
     logger.info(">>> FASE 2: Families Classification")
     final_preds_map = {} 
     
     ai_indices = [i for i, x in enumerate(is_ai_preds) if x == 1]
     
     if len(ai_indices) > 0:
-        # Crea sotto-dataframe solo con le righe AI
         df_ai = df.iloc[ai_indices].reset_index(drop=True)
-        # Salviamo gli indici originali (che ora sono sicuri 0..N grazie al reset iniziale)
         original_idx_map = df.iloc[ai_indices].index.tolist()
         
         tok_fam = AutoTokenizer.from_pretrained(FAMILIES_CFG["model"]["model_name"])
@@ -163,14 +148,12 @@ def main():
                 
                 for p in preds:
                     orig_idx = original_idx_map[local_ptr]
-                    # Mappa 0-9 -> 1-10
                     final_preds_map[orig_idx] = p + 1
                     local_ptr += 1
         
         del model_fam
         torch.cuda.empty_cache()
 
-    # --- FASE 3: Assemblaggio ---
     logger.info(">>> FASE 3: Scrittura Submission")
     final_labels = []
     
@@ -179,11 +162,9 @@ def main():
         if is_ai_preds[i] == 0:
             final_labels.append(0)
         else:
-            # Qui ora siamo sicuri che 'i' corrisponde agli indici in final_preds_map
             if i in final_preds_map:
                 final_labels.append(final_preds_map[i])
             else:
-                # Questo non dovrebbe più succedere
                 final_labels.append(1) 
                 fallback_count += 1
                 
@@ -198,7 +179,7 @@ def main():
     os.makedirs(SUBMISSION_DIR, exist_ok=True)
     submission.to_csv(SUBMISSION_FILE, index=False)
     
-    logger.info(f"✅ Sottomissione salvata: {SUBMISSION_FILE}")
+    logger.info(f"Sottomissione salvata: {SUBMISSION_FILE}")
     logger.info("\nDistribuzione Finale:")
     logger.info(submission['label'].value_counts().sort_index())
 

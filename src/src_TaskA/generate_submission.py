@@ -8,13 +8,12 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch.amp import autocast
 from dotenv import load_dotenv
-from typing import List, Optional
+from typing import List
 
-# Import PEFT per LoRA
 from peft import PeftModel
 
-from src_TaskA.models.model import CodeClassifier
-from src_TaskA.dataset.Inference_dataset import InferenceDataset
+from src.src_TaskA.models.model import CodeClassifier
+from src.src_TaskA.dataset.Inference_dataset import InferenceDataset
 
 # -----------------------------------------------------------------------------
 # Configuration & UX
@@ -40,22 +39,18 @@ def load_model_for_submission(config_path: str, checkpoint_dir: str, device: tor
     """
     Carica il modello per la sottomissione gestendo LoRA e Custom Heads.
     """
-    # 1. Load Config
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
     logger.info("Initializing Model Architecture...")
     model = CodeClassifier(config)
     
-    # Paths
     adapter_path = checkpoint_dir
     heads_path = os.path.join(checkpoint_dir, "heads.pt")
     
-    # Path alternativi per Full Model
     new_model_path = os.path.join(checkpoint_dir, "best_model_taskA.pt")
     old_model_path = os.path.join(checkpoint_dir, "best_model.pt")
 
-    # Verifica LoRA
     is_lora = os.path.exists(os.path.join(checkpoint_dir, "adapter_config.json"))
     
     if is_lora:
@@ -66,12 +61,10 @@ def load_model_for_submission(config_path: str, checkpoint_dir: str, device: tor
             logger.info(f"Loading custom heads from {heads_path}...")
             heads_state = torch.load(heads_path, map_location=device, weights_only=False)
             
-            # Caricamento Safe
             if 'classifier' in heads_state:
                 model.classifier.load_state_dict(heads_state['classifier'])
             if 'pooler' in heads_state:
                 model.pooler.load_state_dict(heads_state['pooler'])
-            # Projection e Language non servono per submission ma le carichiamo per coerenza
             if 'projection' in heads_state:
                 model.projection_head.load_state_dict(heads_state['projection'])
         else:
@@ -95,7 +88,7 @@ def load_model_for_submission(config_path: str, checkpoint_dir: str, device: tor
     return model
 
 # -----------------------------------------------------------------------------
-# Submission Logic
+# Submission
 # -----------------------------------------------------------------------------
 def run_inference_pipeline(
     model_wrapper: CodeClassifier, 
@@ -108,7 +101,6 @@ def run_inference_pipeline(
     """
     Executes the full inference pipeline: Dataset prep -> Inference -> CSV Generation.
     """
-    # Initialize Dataset (Nessuna augmentation per submission)
     dataset = InferenceDataset(
         dataframe=test_df, 
         tokenizer=model_wrapper.tokenizer, 
@@ -129,11 +121,9 @@ def run_inference_pipeline(
 
     logger.info(f"Starting inference on {len(dataset)} samples...")
 
-    # Precision settings
     device_type = "cuda" if device.type == "cuda" else "cpu"
     dtype = torch.float16 if device_type == "cuda" else torch.float32
 
-    # Inference Loop
     with torch.no_grad():
         progress_bar = tqdm(dataloader, desc="Generating Predictions", dynamic_ncols=True)
         
@@ -143,34 +133,29 @@ def run_inference_pipeline(
             batch_ids = batch["id"]
 
             with autocast(device_type=device_type, dtype=dtype):
-                # IMPORTANTE: alpha=0.0 per disabilitare DANN
                 logits, _ = model_wrapper(input_ids, attention_mask, alpha=0.0)
             
-            # Greedy decoding
             preds = torch.argmax(logits, dim=1).cpu().tolist()
             
             ids.extend(batch_ids)
             predictions.extend(preds)
 
-    # Artifact Generation
     submission_df = pd.DataFrame({
         id_col_name: ids,  
         "label": predictions
     })
     
-    # Ensure output directory hierarchy exists
     output_dir = os.path.dirname(output_file)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
-    # Write to disk
     submission_df.to_csv(output_file, index=False)
     
     logger.info(f"Submission artifact saved: {output_file}")
     print(f"\nPreview:\n{submission_df.head().to_string(index=False)}")
 
 # -----------------------------------------------------------------------------
-# Main Execution Flow
+# Main Execution
 # -----------------------------------------------------------------------------
 def main():
     load_dotenv()
@@ -178,20 +163,16 @@ def main():
     
     ConsoleUX.print_banner("SemEval Task 13 - Submission Generator")
 
-    # 1. Configuration
-    config_path = "src_TaskA/config/config.yaml"
-    # Percorso dei checkpoint generati dal train.py
-    checkpoint_dir = "results_TaskA/checkpoints"
+    config_path = "src/src_TaskA/config/config.yaml"
+    checkpoint_dir = "results/results_TaskA/checkpoints"
     
     if not os.path.exists(config_path):
         logger.critical(f"Config file missing: {config_path}")
         sys.exit(1)
 
-    # 2. Hardware Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
-    # 3. Model Initialization & Loading
     try:
         model_wrapper = load_model_for_submission(config_path, checkpoint_dir, device)
     except Exception as e:
@@ -199,12 +180,10 @@ def main():
         logger.info("Tip: Did you complete the training successfully?")
         sys.exit(1)
 
-    # 4. Data Ingestion
     test_path = "data/Task_A/test.parquet"
     
     if not os.path.exists(test_path):
         logger.error(f"Test dataset not found at: {test_path}")
-        # Fallback a validation per testare il codice se manca il test ufficiale
         if os.path.exists("data/Task_A/validation.parquet"):
             logger.warning("Falling back to validation.parquet for testing code logic...")
             test_path = "data/Task_A/validation.parquet"
@@ -214,23 +193,19 @@ def main():
     logger.info(f"Loading Test Data: {test_path}")
     df = pd.read_parquet(test_path)
     
-    # 5. Schema Validation (ID Column)
     possible_id_cols = ["id", "ID", "sample_id"]
     id_col_name = next((col for col in possible_id_cols if col in df.columns), None)
             
     if not id_col_name:
-        # Se manca l'ID, ne creiamo uno fittizio per non crashare
         logger.warning("Missing ID column. Creating fake index IDs.")
         df["id"] = range(len(df))
         id_col_name = "id"
     
     logger.info(f"Target ID Column: '{id_col_name}'")
 
-    # 6. Pre-processing
     df['code'] = df['code'].str.slice(0, 4096)
 
-    # 7. Execution
-    output_file = "./results_TaskA/submission/submission_task_a.csv"
+    output_file = "./results/results_TaskA/submission/submission_task_a.csv"
     
     run_inference_pipeline(
         model_wrapper=model_wrapper, 
