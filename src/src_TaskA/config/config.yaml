@@ -6,15 +6,15 @@ data:
   val_path: "data/Task_A/validation.parquet"
   max_length: 512
   balance_languages: True
-  samples_per_lang: 6000 
+  samples_per_lang: 5000 
 
 # ---------------------
 # Model Architecture
 # ---------------------
 model:
-  model_name: "microsoft/unixcoder-base"
+  model_name: "microsoft/graphcodebert-base" 
   num_labels: 2 
-  use_lora: true 
+  use_lora: false 
   extra_dropout: 0.15 
   languages:
     - python
@@ -39,11 +39,11 @@ training:
   output_dir: "./results/results_TaskA"
   checkpoint_dir: "./results/results_TaskA/checkpoints"
   log_dir: "./results/results_TaskA/logs"
-  num_epochs: 15
-  early_stop_patience: 5
-  batch_size: 16
-  gradient_accumulation_steps: 4
-  learning_rate: 0.0003
+  num_epochs: 12
+  early_stop_patience: 3
+  batch_size: 24 
+  gradient_accumulation_steps: 2
+  learning_rate: 0.000015 
   evaluation_metric: "f1"
   best_metric_lower_is_better: false
   warmup_ratio: 0.1

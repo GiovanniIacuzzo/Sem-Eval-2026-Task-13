@@ -6,17 +6,11 @@ import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 try:
-    from pytorch_metric_learning import losses
-    METRIC_LEARNING_AVAILABLE = True
-except ImportError:
-    METRIC_LEARNING_AVAILABLE = False
-    print("WARNING: pytorch-metric-learning not found. Install with 'pip install pytorch-metric-learning'")
-
-try:
     from peft import get_peft_model, LoraConfig, TaskType
     PEFT_AVAILABLE = True
 except ImportError:
     PEFT_AVAILABLE = False
+    print("Warning: PEFT not found. Running full fine-tuning if LoRA is requested.")
 
 # -----------------------------------------------------------------------------
 # 1. Gradient Reversal Layer
@@ -36,7 +30,10 @@ class GradientReversalFn(torch.autograd.Function):
 # 2. Attention Pooling
 # -----------------------------------------------------------------------------
 class AttentionHead(nn.Module):
-    """Pooling intelligente che impara quali token sono importanti."""
+    """
+    Pooling che impara a pesare i token.
+    Fondamentale per capire quali parti del codice sono "sospette".
+    """
     def __init__(self, hidden_size, dropout_prob=0.1):
         super().__init__()
         self.attn = nn.Sequential(
@@ -68,27 +65,33 @@ class CodeClassifier(nn.Module):
         model_cfg = config.get("model", {})
         data_cfg  = config.get("data", {})
         
-        self.model_name = model_cfg.get("model_name", "microsoft/codebert-base")
+        self.model_name = model_cfg.get("model_name", "microsoft/graphcodebert-base")
         self.num_labels = 2
         self.target_languages = model_cfg.get("languages", ["python", "java", "cpp"])
         self.num_languages = len(self.target_languages)
         self.max_length = data_cfg.get("max_length", 512)
         
+        print(f"Loading base model: {self.model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         base_model = AutoModel.from_pretrained(self.model_name)
         self.hidden_size = base_model.config.hidden_size
 
-        self.use_lora = model_cfg.get("use_lora", True) and PEFT_AVAILABLE
+        self.use_lora = model_cfg.get("use_lora", False) and PEFT_AVAILABLE
         
         if self.use_lora:
-            print(f"Activating LoRA for {self.model_name}...")
+            print(f"Activating LoRA (Rank 64)...")
             peft_config = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION, 
-                inference_mode=False, r=16, lora_alpha=32, lora_dropout=0.1,
-                target_modules=["query", "value", "key", "dense"]
+                inference_mode=False, 
+                r=64,
+                lora_alpha=128,
+                lora_dropout=0.1,
+                target_modules=["query", "value", "key", "dense", "output.dense"] 
             )
             self.base_model = get_peft_model(base_model, peft_config)
+            self.base_model.print_trainable_parameters()
         else:
+            print("Full Fine-Tuning Mode Activated.")
             self.base_model = base_model
             self.base_model.gradient_checkpointing_enable()
 
@@ -98,36 +101,23 @@ class CodeClassifier(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size),
             nn.Mish(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.15),
             nn.Linear(self.hidden_size, self.num_labels)
-        )
-        
-        self.projection_head = nn.Sequential(
-            nn.Linear(self.hidden_size, self.hidden_size),
-            nn.ReLU(),
-            nn.Linear(self.hidden_size, 128) 
         )
         
         self.language_classifier = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size // 2),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(self.hidden_size // 2, self.num_languages)
         )
 
         self._init_weights(self.classifier)
-        self._init_weights(self.projection_head)
         self._init_weights(self.language_classifier)
 
-        # --- LOSS FUNCTIONS ---
         self.ce_loss = nn.CrossEntropyLoss(label_smoothing=0.05)
         self.dann_loss = nn.CrossEntropyLoss(ignore_index=-1)
         
-        if METRIC_LEARNING_AVAILABLE:
-            self.supcon_loss = losses.SupConLoss(temperature=0.07)
-        else:
-            self.supcon_loss = None
-
-        self.contrastive_weight = 0.5 
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -137,6 +127,7 @@ class CodeClassifier(nn.Module):
 
     def forward(self, input_ids, attention_mask, lang_ids=None, labels=None, alpha=1.0):
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
+        
         features = self.pooler(outputs.last_hidden_state, attention_mask)
 
         task_logits = self.classifier(features)
@@ -144,21 +135,16 @@ class CodeClassifier(nn.Module):
         loss = None
         if labels is not None:
             loss_ce = self.ce_loss(task_logits, labels)
+            loss = loss_ce
             
-            loss_scl = 0.0
-            if self.supcon_loss is not None:
-                proj_features = self.projection_head(features)
-                proj_features = F.normalize(proj_features, p=2, dim=1)
-                
-                loss_scl = self.supcon_loss(proj_features, labels)
-            
-            loss_dann = 0.0
             if lang_ids is not None and alpha > 0:
-                reversed_feats = GradientReversalFn.apply(features, alpha)
+                effective_alpha = alpha 
+                reversed_feats = GradientReversalFn.apply(features, effective_alpha)
+                
                 lang_logits = self.language_classifier(reversed_feats)
                 loss_dann = self.dann_loss(lang_logits, lang_ids)
-            
-            loss = loss_ce + (self.contrastive_weight * loss_scl) + loss_dann
+                
+                loss = loss + (0.1 * loss_dann)
             
         return task_logits, loss
 
@@ -169,4 +155,9 @@ class CodeClassifier(nn.Module):
         
         acc = accuracy_score(labels, preds)
         p, r, f1, _ = precision_recall_fscore_support(labels, preds, average="binary")
-        return {"accuracy": acc, "precision": p, "recall": r, "f1": f1}
+        return {
+            "accuracy": acc, 
+            "precision": p, 
+            "recall": r, 
+            "f1": f1
+        }
