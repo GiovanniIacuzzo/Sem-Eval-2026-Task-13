@@ -16,26 +16,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configurazione Costanti
+# --- CONFIGURAZIONE TURBO ---
 MODEL_NAME = "bigcode/starcoder2-3b"
-MAX_SOURCE_LEN = 1024
-MAX_NEW_TOKENS = 512
+MAX_SOURCE_LEN = 512
+MAX_NEW_TOKENS = 384
+BATCH_SIZE = 48
 
 def get_model():
-    logger.info(f"Loading Model: {MODEL_NAME}...")
+    logger.info(f"Loading Model: {MODEL_NAME} (Turbo Mode)...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        # StarCoder non ha un pad token di default, usiamo EOS
+        tokenizer.padding_side = "left" 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
             
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            load_in_4bit=True,
-            attn_implementation="flash_attention_2" if torch.cuda.get_device_capability()[0] >= 8 else "eager"
+            torch_dtype=torch.bfloat16, 
+            attn_implementation="sdpa",
+            device_map=None
         )
+        model.to("cuda")
         model.eval()
         return model, tokenizer
     except Exception as e:
@@ -43,130 +44,117 @@ def get_model():
         raise e
 
 def clean_generation(generated_text, target_lang):
-    """
-    Pulisce l'output del modello rimuovendo markdown e prompt residui.
-    """
-    # 1. Rimuovi blocchi markdown (```go ... ```)
     pattern = r"```(?:{})?(.*?)```".format(target_lang.lower())
     match = re.search(pattern, generated_text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
     
-    # 2. Fallback: Cerca di tagliare dopo il prompt se non ha usato markdown
-    # Spesso il modello ripete il commento "# Go:"
     marker = f"# {target_lang}:"
     if marker in generated_text:
         return generated_text.split(marker)[-1].strip()
         
     return generated_text.strip()
 
-def translate_code(model, tokenizer, code, target_lang):
-    """
-    Traduce lo snippet preservando la logica. Include gestione errori e troncamento.
-    """
-    # Troncamento preventivo per evitare errori di context length
-    if len(code) > MAX_SOURCE_LEN * 4: # Stima caratteri -> token
-        code = code[:MAX_SOURCE_LEN * 4]
-
-    # Prompt ottimizzato per StarCoder2
-    prompt = f"<filename>solution.{target_lang.lower()}\n# Translate the following Python code to {target_lang}.\n# Python:\n{code}\n\n# {target_lang}:\n"
-    
-    try:
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        
-        terminators = [tokenizer.eos_token_id]
-        
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs, 
-                max_new_tokens=MAX_NEW_TOKENS,
-                temperature=0.2,
-                top_p=0.95,
-                do_sample=True,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=terminators,
-                repetition_penalty=1.1
-            )
-        
-        full_output = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        gen_only = full_output[len(tokenizer.decode(inputs.input_ids[0], skip_special_tokens=True)):]
-        
-        return clean_generation(gen_only, target_lang)
-
-    except Exception as e:
-        logger.warning(f"Translation failed: {e}")
-        return None
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_path", type=str, default="data/Task_A/train.parquet")
-    parser.add_argument("--output_path", type=str, default="data/Task_A/train_augmented.parquet")
-    parser.add_argument("--num_samples", type=int, default=3000, help="Samples to translate")
-    parser.add_argument("--batch_size", type=int, default=1, help="Keep 1 for stability with LLMs")
+    parser.add_argument("--output_path", type=str, default="data/Task_A/train_paired_augmented.parquet")
+    parser.add_argument("--num_samples", type=int, default=3000)
     args = parser.parse_args()
 
     if not os.path.exists(args.input_path):
-        logger.error(f"Input file not found: {args.input_path}")
         return
 
     logger.info("Loading dataset...")
     df = pd.read_parquet(args.input_path)
+    if 'language' in df.columns:
+        df['language'] = df['language'].astype(str).str.lower().str.strip()
     
-    # Filtro: Solo Human (0) e Solo Python
     source_df = df[(df['label'] == 0) & (df['language'] == 'python')].copy()
     
-    if source_df.empty:
-        logger.error("No valid source data found (Python + Human).")
-        return
-
-    # Campionamento se necessario
     if len(source_df) > args.num_samples:
         source_df = source_df.sample(n=args.num_samples, random_state=42)
     
-    logger.info(f"Selected {len(source_df)} samples for augmentation.")
+    source_df = source_df.reset_index(drop=True)
+    
+    logger.info(f"Selected {len(source_df)} samples. Processing with BATCH_SIZE={BATCH_SIZE}")
     
     model, tokenizer = get_model()
-    
     target_langs = ["go", "c#", "javascript", "php", "c"]
     
     augmented_rows = []
-    success_count = 0
     
-    logger.info("Starting translation loop...")
-    for idx, row in tqdm(source_df.iterrows(), total=len(source_df), dynamic_ncols=True):
-        original_code = row['code']
+    # Loop Principale
+    for i in tqdm(range(0, len(source_df), BATCH_SIZE), desc="Turbo Translation"):
+        batch_df = source_df.iloc[i : i + BATCH_SIZE]
         
-        # Controllo validità codice sorgente
-        if not isinstance(original_code, str) or len(original_code.strip()) < 10:
+        prompts = []
+        target_langs_batch = []
+        original_codes = []
+        
+        for idx, row in batch_df.iterrows():
+            code = row['code']
+            if len(code) > MAX_SOURCE_LEN * 3: code = code[:MAX_SOURCE_LEN * 3]
+            
+            t_lang = target_langs[idx % len(target_langs)]
+            
+            prompt = f"<filename>solution.{t_lang.lower()}\n# Translate the following Python code to {t_lang}.\n# Python:\n{code}\n\n# {t_lang}:\n"
+            prompts.append(prompt)
+            target_langs_batch.append(t_lang)
+            original_codes.append(code)
+
+        if not prompts: continue
+
+        try:
+            inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=MAX_SOURCE_LEN).to("cuda")
+            
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=MAX_NEW_TOKENS,
+                    do_sample=False, 
+                    temperature=None, 
+                    top_p=None,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id
+                )
+            
+            decoded_outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            
+            for j, full_output in enumerate(decoded_outputs):
+                clean_code = clean_generation(full_output, target_langs_batch[j])
+                
+                if clean_code and len(clean_code) > 10:
+                    augmented_rows.append({
+                        "original_code": original_codes[j],
+                        "augmented_code": clean_code,
+                        "label": 0,
+                        "original_lang": "python",
+                        "augmented_lang": target_langs_batch[j].lower()
+                    })
+
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                logger.warning("OOM detected! Clearing cache and skipping batch. Reduce BATCH_SIZE if frequent.")
+                torch.cuda.empty_cache()
+                continue
+            else:
+                logger.error(f"Batch error: {e}")
+                continue
+        except Exception as e:
+            logger.error(f"Generic error: {e}")
             continue
             
-        target_lang = target_langs[idx % len(target_langs)]
-        
-        trans_code = translate_code(model, tokenizer, original_code, target_lang)
-        
-        if trans_code and len(trans_code.strip()) > 10:
-            augmented_rows.append({
-                "original_code": original_code,
-                "augmented_code": trans_code,
-                "label": 0, 
-                "original_lang": "python",
-                "augmented_lang": target_lang.lower()
-            })
-            success_count += 1
-        
-        if idx % 50 == 0:
-            gc.collect()
+        if i % (BATCH_SIZE * 5) == 0:
             torch.cuda.empty_cache()
 
-    logger.info(f"Augmentation finished. Success rate: {success_count}/{len(source_df)}")
+    logger.info(f"Augmentation finished. Generated {len(augmented_rows)} pairs.")
 
     if augmented_rows:
         aug_df = pd.DataFrame(augmented_rows)
         os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
         aug_df.to_parquet(args.output_path)
         logger.info(f"Saved paired dataset to {args.output_path}")
-    else:
-        logger.warning("No data generated.")
 
 if __name__ == "__main__":
     main()
