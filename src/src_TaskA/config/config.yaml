@@ -4,7 +4,7 @@
 data:
   train_path: "data/Task_A/train.parquet"
   val_path: "data/Task_A/validation.parquet"
-  max_length: 384
+  max_length: 512  
   balance_languages: True
   samples_per_lang: 6000
   stylo_feature_dim: 13 
@@ -15,7 +15,7 @@ data:
 model:
   model_name: "microsoft/unixcoder-base" 
   num_labels: 2 
-  use_lora: true 
+  use_lora: True
   extra_dropout: 0.1 
 
 # ---------------------
@@ -26,13 +26,13 @@ training:
   checkpoint_dir: "./results/results_TaskA/checkpoints"
   log_dir: "./results/results_TaskA/logs"  
   num_epochs: 15
-  early_stop_patience: 5
-  batch_size: 32
-  gradient_accumulation_steps: 1
-  learning_rate: 0.0002 
+  early_stop_patience: 4
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  learning_rate: 0.0002   
   evaluation_metric: "f1"
   best_metric_lower_is_better: false
-  warmup_ratio: 0.1 
+  warmup_ratio: 0.1
   fp16: true
   label_smoothing: 0.05
 

@@ -1,5 +1,6 @@
 import re
 import os
+import random
 import logging
 import pandas as pd
 import torch
@@ -7,12 +8,24 @@ import numpy as np
 from typing import Dict, List, Iterator
 from torch.utils.data import Dataset, Sampler
 
+# -----------------------------------------------------------------------------
+# FIX IMPORTS & FALLBACK
+# -----------------------------------------------------------------------------
 try:
-    from src_TaskA.features.stylometry import StylometryExtractor
+    from src.src_TaskA.features.stylometry import StylometryExtractor
 except ImportError:
-    print("WARNING: StylometryExtractor not found. Using dummy implementation.")
-    class StylometryExtractor:
-        def extract(self, code): return np.zeros(12, dtype=np.float32)
+    try:
+        from src_TaskA.features.stylometry import StylometryExtractor
+    except ImportError:
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print("WARNING: StylometryExtractor NOT FOUND. Using DUMMY (Zeros).")
+        print("Check your folder structure or imports in dataset.py")
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        
+        class StylometryExtractor:
+            def extract(self, code): 
+                # Deve essere 13 per matchare il config
+                return np.zeros(13, dtype=np.float32)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -86,6 +99,7 @@ class CodeDataset(Dataset):
         
         self.stylo_extractor = StylometryExtractor()
 
+        # Verifica presenza colonna per i dati paired
         self.has_paired_data = 'aug_code' in self.data.columns
 
     def __len__(self) -> int:
@@ -133,7 +147,7 @@ class CodeDataset(Dataset):
             "lang_ids": torch.tensor(lang_id, dtype=torch.long)
         }
 
-        # --- B. Dati Paired ---
+        # --- B. Dati Paired (Consistency) ---
         if self.has_paired_data:
             aug_code_raw = self.data.at[idx, "aug_code"]
             
@@ -160,21 +174,19 @@ class CodeDataset(Dataset):
         return item
 
 # -----------------------------------------------------------------------------
-# 3. Data Loading Utils
+# 3. Data Loading Utils (CON FILTRO RILASSATO)
 # -----------------------------------------------------------------------------
 def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataFrame:
-    # Carichiamo tutte le colonne possibili
     if not os.path.exists(file_path):
         return pd.DataFrame()
 
     try:
-        # Leggiamo tutto, poi filtriamo
         df = pd.read_parquet(file_path)
     except Exception as e:
         logger.error(f"Failed to load {file_path}: {e}")
         raise e
     
-    # Rinomina per compatibilità se usiamo il file generato da augment_data.py
+    # Rinomina per compatibilità
     if 'original_code' in df.columns and 'augmented_code' in df.columns:
         logger.info("Detected Paired Dataset format. Renaming columns...")
         df = df.rename(columns={
@@ -189,12 +201,35 @@ def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataF
         logger.warning(f"File {file_path} missing required columns. Found: {df.columns}")
         return pd.DataFrame()
 
-    df['language'] = df['language'].str.lower()
-    df = df.dropna(subset=['code', 'label']).reset_index(drop=True)
-    df = df[df['code'].str.strip().str.len() > 10].copy()
+    # Normalizzazione Base
+    df['language'] = df['language'].str.lower().str.strip()
+    df['label'] = pd.to_numeric(df['label'], errors='coerce').fillna(-1).astype(int)
+    
+    initial_len = len(df)
+    
+    # [FIX] FILTRAGGIO MENO AGGRESSIVO
+    # 1. Rimuovi righe vuote o NaN
+    df = df.dropna(subset=['code', 'label'])
+    
+    # 2. Rilassiamo il limite di lunghezza (10 char bastano per "print(x)")
+    df = df[df['code'].str.strip().str.len() > 10]
+    
+    # 3. RIMOSSO: Filtro Regex su simboli specifici
+    # code_indicators = ['(', ')', '=', '{', '}', 'def ', 'import ', 'class ', ';', 'return', 'var ', 'func ']
+    # pattern = '|'.join([re.escape(x) for x in code_indicators])
+    # df = df[df['code'].str.contains(pattern, regex=True)]
+    
+    # 4. Rimuovi specifici "errori" noti (Testo boilerplate AI)
+    df = df[~df['code'].str.startswith("valid version for the language")]
+    
+    # Troncatura finale
     df['code'] = df['code'].str.slice(0, max_code_chars)
     
-    return df
+    filtered_len = len(df)
+    if initial_len - filtered_len > 0:
+        logger.info(f"Data Cleaning on {os.path.basename(file_path)}: Dropped {initial_len - filtered_len} rows (Relaxed Filter).")
+    
+    return df.reset_index(drop=True)
 
 def balance_languages(df: pd.DataFrame, target_samples: int = 5000) -> pd.DataFrame:
     if df.empty or 'language' not in df.columns: return df
@@ -219,21 +254,23 @@ def load_data(config: dict, tokenizer):
     train_path = config["data"]["train_path"]
     val_path = config["data"]["val_path"]
     
-    # 1. Train Originale
+    # 1. Train Originale (Verrà pulito automaticamente)
     train_df = load_and_preprocess(train_path)
     
-    # 2. Train Paired
+    # 2. Train Paired (Già pulito, ma passa comunque il check)
     train_dir = os.path.dirname(train_path)
-    paired_path = os.path.join(train_dir, "train_augmented.parquet")
+    paired_path = os.path.join(train_dir, "train_augmented.parquet") 
     
     if os.path.exists(paired_path):
         logger.info(f"FOUND PAIRED DATA: {paired_path}")
         paired_df = load_and_preprocess(paired_path)
+        
+        # Merge: train originale + dati paired
         train_df = pd.concat([train_df, paired_df], ignore_index=True)
         logger.info(f"Merged paired data. Total Train Size: {len(train_df)}")
         logger.info(f"Paired samples count: {train_df['aug_code'].notna().sum()}")
     else:
-        logger.warning("No paired data found. Consistency Loss will be disabled.")
+        logger.warning(f"No paired data found at {paired_path}. Consistency Loss will be disabled.")
         train_df['aug_code'] = None
 
     # 3. Validation

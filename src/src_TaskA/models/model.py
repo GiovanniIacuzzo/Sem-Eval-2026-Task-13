@@ -45,8 +45,8 @@ class StyloNet(nn.Module):
     def __init__(self, input_dim, output_dim=64):
         super().__init__()
         self.net = nn.Sequential(
-            nn.BatchNorm1d(input_dim), 
             nn.Linear(input_dim, output_dim * 2),
+            nn.LayerNorm(output_dim * 2), 
             nn.Mish(),
             nn.Dropout(0.2),
             nn.Linear(output_dim * 2, output_dim),
@@ -84,13 +84,15 @@ class FusionCodeClassifier(nn.Module):
         
         if self.use_lora:
             print(f"Activating LoRA for Domain Generalization...")
+            # [IMPROVEMENT] Target Modules più completi per RoBERTa/UniXcoder
+            # UniXcoder layers: query, key, value, dense, output.dense, etc.
             peft_config = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION, 
                 inference_mode=False, 
-                r=16,
-                lora_alpha=32,
+                r=32,            # Aumentato R per più capacità
+                lora_alpha=64,   # Aumentato Alpha
                 lora_dropout=0.1,
-                target_modules=["query", "key", "value", "dense"] 
+                target_modules=["query", "key", "value", "dense", "fc", "out_proj"] 
             )
             self.base_model = get_peft_model(self.base_model, peft_config)
             self.base_model.print_trainable_parameters()
@@ -100,23 +102,19 @@ class FusionCodeClassifier(nn.Module):
         # --- Components ---
         self.pooler = HybridPooling(self.hidden_size)
         
-        # Ramo Stilometrico
         self.stylo_hidden_dim = 64
         self.stylo_net = StyloNet(self.stylo_input_dim, self.stylo_hidden_dim)
         
         self.fusion_dim = (self.hidden_size * 2) + self.stylo_hidden_dim
         
-        # Projection Head per Supervised Contrastive Learning (SupCon)
         self.supcon_head = nn.Sequential(
             nn.Linear(self.fusion_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 128)
         )
         
-        # Multi-Sample Dropout
         self.dropouts = nn.ModuleList([nn.Dropout(0.2) for _ in range(5)])
         
-        # Classificatore Finale
         self.classifier = nn.Sequential(
             nn.Linear(self.fusion_dim, self.hidden_size // 2),
             nn.Mish(),
@@ -134,30 +132,26 @@ class FusionCodeClassifier(nn.Module):
                 nn.init.constant_(module.bias, 0)
 
     def forward(self, input_ids, attention_mask, stylo_feats=None, labels=None, return_embedding=False):
-        """
-        Input:
-            input_ids, attention_mask: Standard Transformer inputs
-            stylo_feats: [Batch, 13] feature statistiche
-            return_embedding: Se True, restituisce vettori per SupCon e Consistency
-        """
-        # 1. Semantic Branch
+        # Base Model Forward
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
         semantic_emb = self.pooler(outputs.last_hidden_state, attention_mask)
         
-        # 2. Stylometric Branch
+        # Stylometry Handling
         if stylo_feats is not None:
+            # Assicuriamoci che il device sia corretto
+            if stylo_feats.device != semantic_emb.device:
+                stylo_feats = stylo_feats.to(semantic_emb.device)
             stylo_emb = self.stylo_net(stylo_feats)
         else:
             device = semantic_emb.device
             dummy_feats = torch.zeros((semantic_emb.size(0), self.stylo_input_dim), device=device)
             stylo_emb = self.stylo_net(dummy_feats)
 
-        # 3. Fusion (Latent Representation)
+        # Fusion
         fused_emb = torch.cat([semantic_emb, stylo_emb], dim=1)
-
         supcon_feats = F.normalize(self.supcon_head(fused_emb), dim=1)
 
-        # 4. Classification
+        # Multi-Sample Dropout (Classification Head)
         task_logits = None
         for i, dropout in enumerate(self.dropouts):
             if i == 0:

@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from comet_ml import Experiment
 from pytorch_metric_learning import losses as metric_losses
 
+# Assumiamo che tu lanci il codice come modulo (python -m src.src_TaskA.train)
 from src.src_TaskA.models.model import FusionCodeClassifier 
 from src.src_TaskA.dataset.dataset import load_data
 from src.src_TaskA.utils.utils import evaluate
@@ -90,7 +91,7 @@ def get_llrd_optimizer_params(model, base_lr, weight_decay=0.01, decay_factor=0.
     return opt_parameters
 
 # -----------------------------------------------------------------------------
-# Training Routine
+# Training Routine (SIMPLIFIED FOR DEBUGGING)
 # -----------------------------------------------------------------------------
 def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, 
                    epoch_idx, total_epochs, accumulation_steps=1, swa_model=None, swa_scheduler=None):
@@ -99,14 +100,11 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
     running_loss = 0.0
     
     # --- Inizializzazione Loss Functions ---
-    # 1. Classification Loss
     ce_criterion = nn.CrossEntropyLoss()
     
-    # 2. SupCon Loss (Raggruppa Human con Human, AI con AI)
-    supcon_criterion = metric_losses.SupConLoss(temperature=0.1).to(device)
-    
-    # 3. Consistency Loss (Forza invarianza alla traduzione)
-    mse_criterion = nn.MSELoss()
+    # COMMENTATO PER DEBUG: Disabilitiamo SupCon e MSE per ora
+    # supcon_criterion = metric_losses.SupConLoss(temperature=0.1).to(device)
+    # mse_criterion = nn.MSELoss()
     
     optimizer.zero_grad()
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}", leave=False, dynamic_ncols=True)
@@ -119,45 +117,23 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         
         # Mixed Precision Context
         with autocast(device_type='cuda', dtype=torch.float16):
-            # --- Forward Pass 1: Dati Originali ---
-            # return_embedding=True ci serve per SupCon e Consistency
-            logits, _, supcon_feats, fused_emb = model(
+            # --- Forward Pass ---
+            # Scompattiamo, ma ignoriamo le feature per SupCon/Consistency per ora
+            logits, _, _, _ = model(
                 input_ids, attention_mask, stylo_feats, labels=None, return_embedding=True
             )
             
-            # A. Cross Entropy Loss (Il compito principale)
-            loss_ce = ce_criterion(logits, labels)
+            # --- A. Cross Entropy Loss (ONLY THIS ONE) ---
+            loss = ce_criterion(logits, labels)
             
-            # B. Supervised Contrastive Loss (Strategia 2)
-            # Aiuta a separare nettamente le classi nello spazio latente
-            loss_supcon = supcon_criterion(supcon_feats, labels)
+            # --- DEBUG: Disabilitiamo le auxiliary losses per evitare il collapse ---
+            # loss_supcon = supcon_criterion(supcon_feats, labels)
+            # total_loss = loss_ce + (0.5 * loss_supcon)
+            # if "has_aug" in batch...
+            # loss = total_loss / accumulation_steps
             
-            total_loss = loss_ce + (0.5 * loss_supcon) # Peso SupCon = 0.5
-            
-            # --- Forward Pass 2: Dati Paired (Strategia 1 - Consistency) ---
-            # Controlliamo se nel batch ci sono dati aumentati validi
-            if "has_aug" in batch:
-                mask_aug = batch["has_aug"].bool().to(device)
-                
-                if mask_aug.any():
-                    # Prendiamo solo i sample che hanno una controparte tradotta
-                    input_ids_aug = batch["input_ids_aug"].to(device, non_blocking=True)
-                    attention_mask_aug = batch["attention_mask_aug"].to(device, non_blocking=True)
-                    stylo_feats_aug = batch["stylo_feats_aug"].to(device, non_blocking=True)
-                    
-                    # Forward sulla traduzione (es. Go)
-                    _, _, _, fused_emb_aug = model(
-                        input_ids_aug, attention_mask_aug, stylo_feats_aug, labels=None, return_embedding=True
-                    )
-                    
-                    # C. Consistency Loss
-                    # Calcoliamo MSE solo sui sample validi (dove mask_aug è True)
-                    # Forza l'embedding di Python(Original) a essere uguale a Go(Translated)
-                    loss_cons = mse_criterion(fused_emb[mask_aug], fused_emb_aug[mask_aug])
-                    
-                    total_loss += (1.0 * loss_cons)
-
-            loss = total_loss / accumulation_steps
+            # Scaliamo la loss per accumulation
+            loss = loss / accumulation_steps
 
         # Backward
         scaler.scale(loss).backward()
@@ -180,15 +156,13 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         
         progress_bar.set_postfix({
             "Loss": f"{current_loss:.4f}",
-            "CE": f"{loss_ce.item():.3f}",
             "LR": f"{optimizer.param_groups[0]['lr']:.1e}"
         })
         
-        # Pulizia memoria
-        del input_ids, attention_mask, labels, logits, loss, supcon_feats, fused_emb
+        del input_ids, attention_mask, labels, logits, loss
 
     return {"loss": running_loss / len(dataloader)}
-
+     
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
@@ -233,7 +207,7 @@ if __name__ == "__main__":
 
     # --- MODEL INIT ---
     logger.info("Initializing Fusion Model...")
-    model = FusionCodeClassifier(config) # <--- Usiamo la classe nuova
+    model = FusionCodeClassifier(config) 
     model.to(device)
 
     # Loading Data
@@ -271,6 +245,15 @@ if __name__ == "__main__":
     swa_start_epoch = int(num_epochs * 0.75)
     swa_model = AveragedModel(model)
     swa_scheduler = SWALR(optimizer, swa_lr=2e-6)
+    
+    # [FIX] Inizializziamo lo scheduler PRIMA del loop e UNA VOLTA SOLA
+    total_steps = len(train_dl) * num_epochs
+    main_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=float(config["training"]["learning_rate"]),
+        total_steps=total_steps, 
+        pct_start=0.1
+    )
 
     best_f1 = 0.0
     patience = config["training"].get("early_stop_patience", 4)
@@ -287,7 +270,7 @@ if __name__ == "__main__":
         
         train_metrics = train_one_epoch(
             model, train_dl, optimizer, 
-            scheduler=None if use_swa else torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=float(config["training"]["learning_rate"]), total_steps=len(train_dl)*num_epochs),
+            scheduler=None if use_swa else main_scheduler,
             scaler=scaler, device=device, 
             epoch_idx=epoch, total_epochs=num_epochs, 
             swa_model=swa_model if use_swa else None,
