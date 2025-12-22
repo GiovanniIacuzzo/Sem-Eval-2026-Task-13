@@ -4,33 +4,19 @@
 data:
   train_path: "data/Task_A/train.parquet"
   val_path: "data/Task_A/validation.parquet"
-  max_length: 512
+  max_length: 384
   balance_languages: True
-  samples_per_lang: 5000 
+  samples_per_lang: 6000
+  stylo_feature_dim: 13 
 
 # ---------------------
 # Model Architecture
 # ---------------------
 model:
-  model_name: "microsoft/graphcodebert-base" 
+  model_name: "microsoft/unixcoder-base" 
   num_labels: 2 
-  use_lora: false 
-  extra_dropout: 0.15 
-  languages:
-    - python
-    - java
-    - c++
-    - c
-    - c#
-    - javascript
-    - typescript
-    - go
-    - php
-    - ruby
-    - rust
-    - kotlin
-    - swift
-    - shell
+  use_lora: true 
+  extra_dropout: 0.1 
 
 # ---------------------
 # Training Hyperparameters
@@ -38,20 +24,20 @@ model:
 training:
   output_dir: "./results/results_TaskA"
   checkpoint_dir: "./results/results_TaskA/checkpoints"
-  log_dir: "./results/results_TaskA/logs"
+  log_dir: "./results/results_TaskA/logs"  
   num_epochs: 15
-  early_stop_patience: 4
-  batch_size: 24
-  gradient_accumulation_steps: 2
-  learning_rate: 0.000015 
+  early_stop_patience: 5
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0002 
   evaluation_metric: "f1"
   best_metric_lower_is_better: false
-  warmup_ratio: 0.1
+  warmup_ratio: 0.1 
   fp16: true
   label_smoothing: 0.05
 
 # ---------------------
-# Demo Mode
+# Demo/Debug Mode
 # ---------------------
 demo:
   active: false 

@@ -166,7 +166,7 @@ if __name__ == "__main__":
                         help="Choose training mode: 'binary' (Human vs AI) or 'families'")
     args = parser.parse_args()
     
-    ConsoleUX.print_banner(f"SemEval 2026 Task 13 - Mode: {args.mode.upper()}")
+    ConsoleUX.print_banner("SemEval 2026 - Task 13 - subtask B")
     
     set_seed(42)
 

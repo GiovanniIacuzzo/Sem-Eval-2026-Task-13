@@ -4,17 +4,18 @@ import logging
 import yaml
 import torch
 import numpy as np
+import random
+import torch.nn as nn 
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from torch.amp import autocast
-from torch.cuda.amp import GradScaler
+from torch.amp import autocast, GradScaler 
 from torch.optim.swa_utils import AveragedModel, SWALR
 from dotenv import load_dotenv
-from sklearn.metrics import confusion_matrix
 
 from comet_ml import Experiment
+from pytorch_metric_learning import losses as metric_losses
 
-from src.src_TaskA.models.model import CodeClassifier
+from src.src_TaskA.models.model import FusionCodeClassifier 
 from src.src_TaskA.dataset.dataset import load_data
 from src.src_TaskA.utils.utils import evaluate
 
@@ -47,7 +48,7 @@ class ConsoleUX:
         logger.info(log_str.strip(" | "))
 
 # -----------------------------------------------------------------------------
-# OPTIMIZER UTILS: LLRD (Layer-wise Learning Rate Decay)
+# OPTIMIZER UTILS: LLRD
 # -----------------------------------------------------------------------------
 def get_llrd_optimizer_params(model, base_lr, weight_decay=0.01, decay_factor=0.95):
     opt_parameters = []
@@ -66,6 +67,7 @@ def get_llrd_optimizer_params(model, base_lr, weight_decay=0.01, decay_factor=0.
         layers = list(model.base_model.encoder.layer)
         layers.reverse()
         lr = base_lr
+        
         for layer in layers:
             lr *= decay_factor
             decay = []
@@ -82,7 +84,6 @@ def get_llrd_optimizer_params(model, base_lr, weight_decay=0.01, decay_factor=0.
         lr *= decay_factor
         opt_parameters.append({"params": embeddings_params, "lr": lr, "weight_decay": weight_decay})
     else:
-        logger.warning("Struttura modello non standard per LLRD. Fallback a LR piatto.")
         backbone_params = [p for n, p in named_parameters if "base_model" in n]
         opt_parameters.append({"params": backbone_params, "lr": base_lr * 0.8, "weight_decay": weight_decay})
 
@@ -96,36 +97,69 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
     
     model.train()
     running_loss = 0.0
-    predictions, references = [], []
+    
+    # --- Inizializzazione Loss Functions ---
+    # 1. Classification Loss
+    ce_criterion = nn.CrossEntropyLoss()
+    
+    # 2. SupCon Loss (Raggruppa Human con Human, AI con AI)
+    supcon_criterion = metric_losses.SupConLoss(temperature=0.1).to(device)
+    
+    # 3. Consistency Loss (Forza invarianza alla traduzione)
+    mse_criterion = nn.MSELoss()
     
     optimizer.zero_grad()
-    
-    len_dataloader = len(dataloader)
-    total_steps_all = len_dataloader * total_epochs 
-    
-    use_supcon = (epoch_idx >= 2)
-    supcon_status = "ON" if use_supcon else "OFF (Warmup)"
-    
-    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1} [SupCon: {supcon_status}]", leave=False, dynamic_ncols=True)
+    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}", leave=False, dynamic_ncols=True)
     
     for step, batch in enumerate(progress_bar):
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
-        lang_ids = batch["lang_ids"].to(device, non_blocking=True)
-
-        current_global_step = step + epoch_idx * len_dataloader
-        p = float(current_global_step) / total_steps_all
-        alpha = 2. / (1. + np.exp(-10 * p)) - 1
+        stylo_feats = batch.get("stylo_feats").to(device, non_blocking=True)
         
+        # Mixed Precision Context
         with autocast(device_type='cuda', dtype=torch.float16):
-            logits, loss = model(
-                input_ids, attention_mask, 
-                lang_ids=lang_ids, labels=labels, 
-                alpha=alpha, use_supcon=use_supcon
+            # --- Forward Pass 1: Dati Originali ---
+            # return_embedding=True ci serve per SupCon e Consistency
+            logits, _, supcon_feats, fused_emb = model(
+                input_ids, attention_mask, stylo_feats, labels=None, return_embedding=True
             )
-            loss = loss / accumulation_steps
+            
+            # A. Cross Entropy Loss (Il compito principale)
+            loss_ce = ce_criterion(logits, labels)
+            
+            # B. Supervised Contrastive Loss (Strategia 2)
+            # Aiuta a separare nettamente le classi nello spazio latente
+            loss_supcon = supcon_criterion(supcon_feats, labels)
+            
+            total_loss = loss_ce + (0.5 * loss_supcon) # Peso SupCon = 0.5
+            
+            # --- Forward Pass 2: Dati Paired (Strategia 1 - Consistency) ---
+            # Controlliamo se nel batch ci sono dati aumentati validi
+            if "has_aug" in batch:
+                mask_aug = batch["has_aug"].bool().to(device)
+                
+                if mask_aug.any():
+                    # Prendiamo solo i sample che hanno una controparte tradotta
+                    input_ids_aug = batch["input_ids_aug"].to(device, non_blocking=True)
+                    attention_mask_aug = batch["attention_mask_aug"].to(device, non_blocking=True)
+                    stylo_feats_aug = batch["stylo_feats_aug"].to(device, non_blocking=True)
+                    
+                    # Forward sulla traduzione (es. Go)
+                    _, _, _, fused_emb_aug = model(
+                        input_ids_aug, attention_mask_aug, stylo_feats_aug, labels=None, return_embedding=True
+                    )
+                    
+                    # C. Consistency Loss
+                    # Calcoliamo MSE solo sui sample validi (dove mask_aug è True)
+                    # Forza l'embedding di Python(Original) a essere uguale a Go(Translated)
+                    loss_cons = mse_criterion(fused_emb[mask_aug], fused_emb_aug[mask_aug])
+                    
+                    total_loss += (1.0 * loss_cons)
 
+            loss = total_loss / accumulation_steps
+
+        # Backward
         scaler.scale(loss).backward()
 
         if (step + 1) % accumulation_steps == 0:
@@ -145,72 +179,64 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         running_loss += current_loss
         
         progress_bar.set_postfix({
-            "Loss": f"{current_loss:.4f}", 
-            "Alpha": f"{alpha:.2f}",
+            "Loss": f"{current_loss:.4f}",
+            "CE": f"{loss_ce.item():.3f}",
             "LR": f"{optimizer.param_groups[0]['lr']:.1e}"
         })
-
-        preds = torch.argmax(logits, dim=1).detach().cpu().numpy()
-        labels_cpu = labels.detach().cpu().numpy()
-        predictions.extend(preds)
-        references.extend(labels_cpu)
         
-        del input_ids, attention_mask, labels, lang_ids, logits, loss
+        # Pulizia memoria
+        del input_ids, attention_mask, labels, logits, loss, supcon_feats, fused_emb
 
-    metrics = model.compute_metrics(predictions, references)
-    metrics["loss"] = running_loss / len(dataloader)
-    return metrics
+    return {"loss": running_loss / len(dataloader)}
 
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = False 
+    torch.backends.cudnn.benchmark = True
+
 if __name__ == "__main__":
+    set_seed(42)
     load_dotenv()
-    ConsoleUX.print_banner("SemEval 2026 Task 13 - Subtask A")
+    ConsoleUX.print_banner("SemEval 2026 - Task 13 - subtask A")
 
     DATA_ROOT = os.getenv("DATA_PATH", "./data")
     task_data_dir = os.path.join(DATA_ROOT, "Task_A")
     
-    if not os.path.exists(task_data_dir):
-        logger.error(f"Directory not found: {task_data_dir}")
-        sys.exit(1)
-    
+    # Configurazione
     config_path = "src/src_TaskA/config/config.yaml"
-    if not os.path.exists(config_path):
-        logger.error(f"Config not found at {config_path}")
-        sys.exit(1)
-
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
+    # Autodiscovery paths
     train_files = [f for f in os.listdir(task_data_dir) if "train" in f and f.endswith(".parquet")]
     val_files = [f for f in os.listdir(task_data_dir) if ("val" in f or "dev" in f) and f.endswith(".parquet")]
 
-    if train_files:
-        config["data"]["train_path"] = os.path.join(task_data_dir, train_files[0])
-    if val_files:
-        config["data"]["val_path"] = os.path.join(task_data_dir, val_files[0])
+    if train_files: config["data"]["train_path"] = os.path.join(task_data_dir, train_files[0])
+    if val_files: config["data"]["val_path"] = os.path.join(task_data_dir, val_files[0])
 
+    # Experiment Tracking
     api_key = os.getenv("COMET_API_KEY")
     if api_key:
-        experiment = Experiment(
-            api_key=api_key,
-            project_name=os.getenv("COMET_PROJECT_NAME"),
-            workspace=os.getenv("COMET_WORKSPACE"),
-            auto_metric_logging=False
-        )
+        experiment = Experiment(api_key=api_key, project_name=os.getenv("COMET_PROJECT_NAME"))
         experiment.log_parameters(config)
     else:
-        logger.warning("Comet API Key not found. Logging disabled.")
         experiment = None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
-    logger.info("Initializing Model...")
-    model = CodeClassifier(config)
+    # --- MODEL INIT ---
+    logger.info("Initializing Fusion Model...")
+    model = FusionCodeClassifier(config) # <--- Usiamo la classe nuova
     model.to(device)
 
+    # Loading Data
     train_dataset, val_dataset, train_sampler, _ = load_data(config, model.tokenizer)
 
     num_workers = 4
@@ -218,7 +244,6 @@ if __name__ == "__main__":
         train_dataset, 
         batch_size=config["training"]["batch_size"], 
         sampler=train_sampler,
-        shuffle=False,
         num_workers=num_workers, 
         pin_memory=True,
         drop_last=True
@@ -232,33 +257,20 @@ if __name__ == "__main__":
         pin_memory=True
     )
 
-    logger.info("Configuring LLRD Optimizer...")
+    # Optimizer & Scheduler
     grouped_params = get_llrd_optimizer_params(
         model, 
         base_lr=float(config["training"]["learning_rate"]),
-        weight_decay=0.01,
-        decay_factor=0.9
+        weight_decay=0.01
     )
     optimizer = torch.optim.AdamW(grouped_params)
-    
     scaler = GradScaler()
-
-    acc_steps = config["training"].get("gradient_accumulation_steps", 1)
+    
+    # SWA Setup
     num_epochs = config["training"].get("num_epochs", 15)
-    
-    total_steps = (len(train_dl) // acc_steps) * num_epochs
-    
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=float(config["training"]["learning_rate"]),
-        total_steps=total_steps, 
-        pct_start=0.1
-    )
-
     swa_start_epoch = int(num_epochs * 0.75)
     swa_model = AveragedModel(model)
     swa_scheduler = SWALR(optimizer, swa_lr=2e-6)
-    logger.info(f"SWA will start at epoch {swa_start_epoch+1}")
 
     best_f1 = 0.0
     patience = config["training"].get("early_stop_patience", 4)
@@ -266,30 +278,26 @@ if __name__ == "__main__":
     save_dir = config["training"]["checkpoint_dir"]
     os.makedirs(save_dir, exist_ok=True)
 
-    logger.info(f"Starting Training for {num_epochs} Epochs...")
-    
+    # --- Training Loop ---
     for epoch in range(num_epochs):
         print(f"\n{'='*20} Epoch {epoch+1}/{num_epochs} {'='*20}")
         
         use_swa = (epoch >= swa_start_epoch)
-        if use_swa:
-            logger.info(">> SWA Active Phase <<")
+        if use_swa: logger.info(">> SWA Active Phase <<")
         
         train_metrics = train_one_epoch(
             model, train_dl, optimizer, 
-            scheduler=None if use_swa else scheduler,
+            scheduler=None if use_swa else torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=float(config["training"]["learning_rate"]), total_steps=len(train_dl)*num_epochs),
             scaler=scaler, device=device, 
             epoch_idx=epoch, total_epochs=num_epochs, 
-            accumulation_steps=acc_steps,
             swa_model=swa_model if use_swa else None,
             swa_scheduler=swa_scheduler if use_swa else None
         )
         ConsoleUX.log_metrics("Train", train_metrics)
         
+        # Validation
         eval_model = swa_model if use_swa else model
-        if use_swa:
-             logger.info("Updating SWA Batch Norm statistics...")
-             torch.optim.swa_utils.update_bn(train_dl, swa_model, device=device)
+        if use_swa: torch.optim.swa_utils.update_bn(train_dl, swa_model, device=device)
         
         val_metrics, val_preds, val_refs = evaluate(eval_model, val_dl, device)
         ConsoleUX.log_metrics("Valid", val_metrics)
@@ -298,30 +306,19 @@ if __name__ == "__main__":
             experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
             experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
         
+        # Checkpointing
         if val_metrics["f1"] > best_f1:
-            logger.info(f"New Best F1: {val_metrics['f1']:.4f} (Prev: {best_f1:.4f})")
+            logger.info(f"New Best F1: {val_metrics['f1']:.4f}")
             best_f1 = val_metrics["f1"]
             patience_counter = 0
             
-            save_path = os.path.join(save_dir, "best_model_taskA.pt")
+            save_path = os.path.join(save_dir, "best_model.pt")
             model_to_save = swa_model.module if use_swa else model
             torch.save(model_to_save.state_dict(), save_path)
-            logger.info(f"Saved Best Model to {save_path}")
-                
-            cm = confusion_matrix(val_refs, val_preds)
-            if experiment:
-                experiment.log_confusion_matrix(matrix=cm, title=f"CM_Epoch_{epoch}")
         else:
             patience_counter += 1
-            logger.info(f"Patience: {patience_counter}/{patience}")
-            
-        torch.save(model.state_dict(), os.path.join(save_dir, "last_model.pt"))
-
-        if patience_counter >= patience and not use_swa:
-            if epoch < swa_start_epoch:
-                logger.info("Early stopping triggered (Pre-SWA). Exiting.")
+            if patience_counter >= patience and not use_swa:
+                logger.info("Early stopping.")
                 break
-            else:
-                logger.info("Ignoring Early Stop during SWA phase.")
 
     logger.info("Training Finished.")

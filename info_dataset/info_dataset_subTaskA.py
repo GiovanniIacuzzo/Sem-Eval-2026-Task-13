@@ -15,9 +15,9 @@ img_path = os.getenv("IMG_PATH", "./img_TaskA")
 os.makedirs(img_path, exist_ok=True)
 
 files = {
-    "Train": "task_a_training_set_1.parquet",
-    "Validation": "task_a_validation_set.parquet",
-    "Test": "task_a_test_set_sample.parquet"
+    "Train": "Task_A/train.parquet",
+    "Validation": "Task_A/validation.parquet",
+    "Test": "Task_A/test_sample.parquet"
 }
 
 # ---------------------------------------
@@ -105,10 +105,10 @@ def eda_dataset(df: pd.DataFrame, name: str):
 # ---------------------------------------
 train_df = load_and_preprocess(os.path.join(data_path, files["Train"]))
 dev_df   = load_and_preprocess(os.path.join(data_path, files["Validation"]))
-# test_df  = load_and_preprocess(os.path.join(data_path, files["Test"]))
+test_df  = load_and_preprocess(os.path.join(data_path, files["Test"]))
 
 eda_dataset(train_df, "Train")
 eda_dataset(dev_df, "Validation")
-# eda_dataset(test_df, "Test")
+eda_dataset(test_df, "Test")
 
 print(f"Tutte le immagini sono state salvate nella cartella {img_path}")

@@ -10,9 +10,6 @@ from tqdm import tqdm
 # Metric Computation
 # -----------------------------------------------------------------------------
 def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
-    """
-    Computes classification metrics for Binary Task (Human vs AI).
-    """
     preds = np.array(preds)
     labels = np.array(labels)
 
@@ -43,8 +40,7 @@ def evaluate(
     device: torch.device
 ) -> Tuple[Dict[str, float], List[int], List[int]]:
     """
-    Runs evaluation loop.
-    Crucial: Sets alpha=0 to disable Adversarial/DANN during validation.
+    Esegue il loop di valutazione passando anche le feature stilometriche.
     """
     model.eval()
     running_loss = 0.0
@@ -53,28 +49,22 @@ def evaluate(
 
     progress_bar = tqdm(dataloader, desc="Evaluating", leave=False, dynamic_ncols=True)
 
-    if device.type == 'cuda':
-        device_type = 'cuda'
-        dtype = torch.float16
-    elif device.type == 'mps':
-        device_type = 'mps'
-        dtype = torch.float16
-    else:
-        device_type = 'cpu'
-        dtype = torch.bfloat16
-
     with torch.no_grad():
         for batch in progress_bar:
             input_ids      = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels         = batch["labels"].to(device, non_blocking=True)
+            
+            stylo_feats    = batch.get("stylo_feats")
+            if stylo_feats is not None:
+                stylo_feats = stylo_feats.to(device, non_blocking=True)
 
-            with autocast(device_type=device_type, dtype=dtype):
-                logits, loss = model.forward(
+            with autocast(device_type='cuda', dtype=torch.float16):
+                logits, loss = model(
                     input_ids, 
                     attention_mask, 
-                    labels=labels, 
-                    alpha=0.0 
+                    stylo_feats=stylo_feats,
+                    labels=labels
                 )
             
             if loss is not None:
@@ -85,15 +75,16 @@ def evaluate(
             predictions.extend(preds.detach().cpu().numpy())
             references.extend(labels.detach().cpu().numpy())
             
-            del input_ids, attention_mask, labels, logits, loss
+            # Pulizia per evitare picchi di VRAM
+            del input_ids, attention_mask, labels, logits, loss, stylo_feats
 
     eval_metrics = compute_metrics(predictions, references)
     eval_metrics["loss"] = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
 
+    # Pulizia memoria GPU aggressiva post-valutazione
     if device.type == 'cuda':
         torch.cuda.empty_cache()
-    elif device.type == 'mps':
-        torch.mps.empty_cache()
+    
     gc.collect()
 
     return eval_metrics, predictions, references

@@ -6,5 +6,6 @@ __pycache__/
 temp.py
 train_baseline.py
 data/
-results_TaskA/
+results/
 test/
+kaggle.json

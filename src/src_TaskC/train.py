@@ -119,7 +119,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
-    ConsoleUX.print_banner("SemEval 2026 Task 13 - Subtask C (K-Fold Optimized)")
+    ConsoleUX.print_banner("SemEval 2026 - Task 13 - subtask C")
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="src/src_TaskC/config/config.yaml") 

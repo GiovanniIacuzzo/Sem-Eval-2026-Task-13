@@ -8,16 +8,28 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score, f1_score
 from torch.amp import autocast
 from dotenv import load_dotenv
 from typing import List, Dict, Tuple
 
-from peft import PeftModel
+# Gestione import se lanciato come script o modulo
+try:
+    from src.src_TaskA.models.model import CodeClassifier
+    from src.src_TaskA.dataset.dataset import CodeDataset, load_and_preprocess
+    from src.src_TaskA.utils.utils import compute_metrics
+except ImportError:
+    # Fallback per esecuzione diretta
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+    from src_TaskA.models.model import CodeClassifier
+    from src_TaskA.dataset.dataset import CodeDataset, load_and_preprocess
+    from src_TaskA.utils.utils import compute_metrics
 
-from src_TaskA.models.model import CodeClassifier
-from src_TaskA.dataset.dataset import CodeDataset, load_and_preprocess
-from src_TaskA.utils.utils import compute_metrics
+try:
+    from peft import PeftModel
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
 
 # -----------------------------------------------------------------------------
 # Logger & Console UX Setup
@@ -48,16 +60,18 @@ class ConsoleUX:
 def load_model_for_inference(config_path: str, checkpoint_dir: str, device: torch.device):
     """
     Carica il modello gestendo sia LoRA che Full Fine-Tuning.
-    FIX: Priorità al caricamento di 'best_model_taskA.pt' (nuovo train).
     """
-    # 1. Load Config
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config not found at {config_path}")
+
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
     logger.info("Initializing Model Architecture...")
     model = CodeClassifier(config)
     
-    adapter_path = os.path.join(checkpoint_dir)
+    # Percorsi possibili
+    lora_adapter = checkpoint_dir # Peft cerca adapter_config.json qui
     heads_path = os.path.join(checkpoint_dir, "heads.pt")
     
     new_model_path = os.path.join(checkpoint_dir, "best_model_taskA.pt")
@@ -65,32 +79,31 @@ def load_model_for_inference(config_path: str, checkpoint_dir: str, device: torc
 
     is_lora = os.path.exists(os.path.join(checkpoint_dir, "adapter_config.json"))
     
-    if is_lora:
+    if is_lora and PEFT_AVAILABLE:
         logger.info(f"Detected LoRA checkpoint in {checkpoint_dir}")
-        model.base_model = PeftModel.from_pretrained(model.base_model, adapter_path)
+        model.base_model = PeftModel.from_pretrained(model.base_model, lora_adapter)
         
         if os.path.exists(heads_path):
             logger.info(f"Loading custom heads from {heads_path}...")
-            heads_state = torch.load(heads_path, map_location=device, weights_only=False)
+            heads_state = torch.load(heads_path, map_location=device)
             
             if 'classifier' in heads_state:
                 model.classifier.load_state_dict(heads_state['classifier'])
             if 'pooler' in heads_state:
                 model.pooler.load_state_dict(heads_state['pooler'])
-            if 'projection' in heads_state:
-                model.projection_head.load_state_dict(heads_state['projection'])
+            # NOTA: Rimosso caricamento projection_head che non esiste più
         else:
             logger.warning(f"Heads file ({heads_path}) NOT FOUND! Using random weights for classifier.")
             
     elif os.path.exists(new_model_path):
-        logger.info(f"Loading NEW Full Fine-Tuned model from {new_model_path}")
-        state_dict = torch.load(new_model_path, map_location=device, weights_only=False)
+        logger.info(f"Loading Full Fine-Tuned model from {new_model_path}")
+        state_dict = torch.load(new_model_path, map_location=device)
+        # strict=False gestisce eventuali discrepanze minori (es. DANN head weights)
         model.load_state_dict(state_dict, strict=False)
         
     elif os.path.exists(old_model_path):
-        logger.warning(f"Found OLD model {old_model_path}. This might cause mismatches if architecture changed.")
-        logger.info(f"Loading OLD Full Fine-Tuned model from {old_model_path}")
-        state_dict = torch.load(old_model_path, map_location=device, weights_only=False)
+        logger.warning(f"Found OLD model {old_model_path}. Loading as fallback.")
+        state_dict = torch.load(old_model_path, map_location=device)
         model.load_state_dict(state_dict, strict=False)
             
     else:
@@ -110,10 +123,13 @@ def run_inference(
     batch_size: int = 32
 ) -> Tuple[List[int], List[int], Dict[str, float]]:
     
+    # Dummy language map per inference (DANN è disattivo, quindi non importa l'ID)
+    dummy_map = {l: i for i, l in enumerate(test_df['language'].unique())}
+
     dataset = CodeDataset(
         dataframe=test_df,
         tokenizer=model_wrapper.tokenizer,
-        language_map=getattr(model_wrapper, "language_map", {}), 
+        language_map=dummy_map, 
         max_length=model_wrapper.max_length,
         augment=False 
     )
@@ -123,7 +139,7 @@ def run_inference(
         batch_size=batch_size, 
         shuffle=False,
         num_workers=2,
-        pin_memory=False
+        pin_memory=True
     )
 
     all_preds, all_refs = [], []
@@ -139,6 +155,7 @@ def run_inference(
             labels = batch["labels"].to(device, non_blocking=True)
 
             with autocast(device_type=device_type, dtype=dtype):
+                # Alpha=0.0 disabilita DANN durante l'inferenza
                 logits, _ = model_wrapper(input_ids, attention_mask, alpha=0.0)
 
             preds = torch.argmax(logits, dim=1)
@@ -149,8 +166,35 @@ def run_inference(
     return all_preds, all_refs, metrics
 
 # -----------------------------------------------------------------------------
-# Visualization
+# Analysis Tools
 # -----------------------------------------------------------------------------
+def analyze_per_language(df, preds, refs):
+    """Calcola metriche separate per ogni linguaggio"""
+    df_res = df.copy()
+    df_res['pred'] = preds
+    df_res['true'] = refs
+    
+    print("\n" + "="*60)
+    print("PER-LANGUAGE BREAKDOWN".center(60))
+    print("="*60)
+    
+    langs = df_res['language'].unique()
+    results = []
+    
+    for lang in sorted(langs):
+        subset = df_res[df_res['language'] == lang]
+        if len(subset) == 0: continue
+        
+        acc = accuracy_score(subset['true'], subset['pred'])
+        f1 = f1_score(subset['true'], subset['pred'], average='macro')
+        count = len(subset)
+        
+        print(f"{lang:<15} | Samples: {count:<5} | Acc: {acc:.4f} | F1: {f1:.4f}")
+        results.append({'lang': lang, 'f1': f1, 'acc': acc, 'count': count})
+        
+    print("="*60 + "\n")
+    return pd.DataFrame(results)
+
 def save_artifacts(preds, refs, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     
@@ -175,19 +219,23 @@ if __name__ == "__main__":
 
     CONFIG_PATH = "src/src_TaskA/config/config.yaml"
     CHECKPOINT_DIR = "results/results_TaskA/checkpoints" 
+    OUTPUT_DIR = "results/results_TaskA/inference_output"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
+    # 1. Load Model
     try:
         model = load_model_for_inference(CONFIG_PATH, CHECKPOINT_DIR, device)
     except Exception as e:
         logger.error(f"Failed to load model: {e}")
         sys.exit(1)
 
+    # 2. Load Data
+    # Priorità: Test Set dedicato -> Validation Set -> Train Set (Debug)
     TEST_FILE = "data/Task_A/test_sample.parquet"
     if not os.path.exists(TEST_FILE):
-        logger.warning(f"{TEST_FILE} not found. Trying validation set...")
+        logger.info("Test file not found, switching to Validation set...")
         TEST_FILE = "data/Task_A/validation.parquet"
     
     if not os.path.exists(TEST_FILE):
@@ -196,9 +244,18 @@ if __name__ == "__main__":
 
     logger.info(f"Loading data from: {TEST_FILE}")
     test_df = load_and_preprocess(TEST_FILE)
-
+    
+    # 3. Inference
     preds, refs, metrics = run_inference(model, test_df, device)
     
+    # 4. Results
     ConsoleUX.log_metrics(metrics)
-    print("\n" + classification_report(refs, preds, target_names=["Human", "AI"]))
-    save_artifacts(preds, refs, "results_TaskA/inference_output")
+    
+    # 5. Detailed Breakdown
+    analyze_per_language(test_df, preds, refs)
+    
+    print("\nGlobal Classification Report:")
+    print(classification_report(refs, preds, target_names=["Human", "AI"]))
+    
+    save_artifacts(preds, refs, OUTPUT_DIR)
+    logger.info(f"Artifacts saved to {OUTPUT_DIR}")
