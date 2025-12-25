@@ -7,7 +7,7 @@ data:
   max_length: 512  
   balance_languages: True 
   samples_per_lang: 30000
-  stylo_feature_dim: 13 
+  stylo_feature_dim: 15 # (modificare in base al codice di stylometry.py)
 
 # ---------------------
 # Model Architecture
