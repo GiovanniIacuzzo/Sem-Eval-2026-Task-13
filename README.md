@@ -118,11 +118,21 @@ modifica `competition_name` inserendo il dataset che desideri scaricare da kaggl
 
 ---
 
-<h2 align="center">✨ Autore ✨</h2>
+<div align="center">
+  <h2>✨ Autore ✨</h2>
 
-<p align="center"> <strong>Giovanni Giuseppe Iacuzzo</strong>
+  <p>
+    <strong>Giovanni Giuseppe Iacuzzo</strong><br>
+    <em>Studente di Ingegneria dell'IA e della Cybersecurity</em><br>
+    <em>Università degli Studi Kore di Enna</em>
+  </p>
 
-
-<em>Studente di Ingegneria Dell'IA e della CyberSecurity · Università degli Studi Kore di Enna</em> </p>
-
-<p align="center"> <a href="https://github.com/giovanniIacuzzo" target="_blank"> <img src="https://img.shields.io/badge/GitHub-%40giovanniIacuzzo-181717?style=for-the-badge&logo=github" alt="GitHub"/> </a> <a href="mailto:giovanni.iacuzzo@unikorestudent.com"> <img src="https://img.shields.io/badge/Email-Contattami-blue?style=for-the-badge&logo=gmail" alt="Email"/> </a> </p>
+  <p>
+    <a href="https://github.com/giovanniIacuzzo" target="_blank">
+      <img src="https://img.shields.io/badge/GitHub-GiovanniIacuzzo-181717?style=for-the-badge&logo=github" alt="GitHub"/>
+    </a>
+    <a href="mailto:giovanni.iacuzzo@unikorestudent.com">
+      <img src="https://img.shields.io/badge/Email-Contattami-D14836?style=for-the-badge&logo=gmail&logoColor=white" alt="Email"/>
+    </a>
+  </p>
+</div>
