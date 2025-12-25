@@ -42,16 +42,17 @@ class HybridPooling(nn.Module):
 # 2. Stylometric Network
 # -----------------------------------------------------------------------------
 class StyloNet(nn.Module):
-    def __init__(self, input_dim, output_dim=64):
+    def __init__(self, input_dim, output_dim=128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, output_dim * 2),
-            nn.LayerNorm(output_dim * 2), 
+            nn.LayerNorm(output_dim * 2),
             nn.Mish(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Linear(output_dim * 2, output_dim),
+            nn.LayerNorm(output_dim),
             nn.Mish(),
-            nn.Dropout(0.1)
+            nn.Dropout(0.2)
         )
         
     def forward(self, x):
@@ -84,14 +85,12 @@ class FusionCodeClassifier(nn.Module):
         
         if self.use_lora:
             print(f"Activating LoRA for Domain Generalization...")
-            # [IMPROVEMENT] Target Modules più completi per RoBERTa/UniXcoder
-            # UniXcoder layers: query, key, value, dense, output.dense, etc.
             peft_config = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION, 
                 inference_mode=False, 
-                r=32,            # Aumentato R per più capacità
-                lora_alpha=64,   # Aumentato Alpha
-                lora_dropout=0.1,
+                r=8,
+                lora_alpha=64,
+                lora_dropout=0.3,
                 target_modules=["query", "key", "value", "dense", "fc", "out_proj"] 
             )
             self.base_model = get_peft_model(self.base_model, peft_config)
@@ -102,7 +101,7 @@ class FusionCodeClassifier(nn.Module):
         # --- Components ---
         self.pooler = HybridPooling(self.hidden_size)
         
-        self.stylo_hidden_dim = 64
+        self.stylo_hidden_dim = 128
         self.stylo_net = StyloNet(self.stylo_input_dim, self.stylo_hidden_dim)
         
         self.fusion_dim = (self.hidden_size * 2) + self.stylo_hidden_dim
@@ -118,7 +117,7 @@ class FusionCodeClassifier(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(self.fusion_dim, self.hidden_size // 2),
             nn.Mish(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.4),
             nn.Linear(self.hidden_size // 2, self.num_labels)
         )
         
@@ -138,7 +137,6 @@ class FusionCodeClassifier(nn.Module):
         
         # Stylometry Handling
         if stylo_feats is not None:
-            # Assicuriamoci che il device sia corretto
             if stylo_feats.device != semantic_emb.device:
                 stylo_feats = stylo_feats.to(semantic_emb.device)
             stylo_emb = self.stylo_net(stylo_feats)

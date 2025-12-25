@@ -1,307 +1,229 @@
 import os
-import sys
 import logging
 import yaml
 import torch
-import numpy as np
-import random
 import torch.nn as nn 
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torch.amp import autocast, GradScaler 
 from torch.optim.swa_utils import AveragedModel, SWALR
 from dotenv import load_dotenv
-
 from comet_ml import Experiment
-from pytorch_metric_learning import losses as metric_losses
 
-# Assumiamo che tu lanci il codice come modulo (python -m src.src_TaskA.train)
 from src.src_TaskA.models.model import FusionCodeClassifier 
 from src.src_TaskA.dataset.dataset import load_data
 from src.src_TaskA.utils.utils import evaluate
 
 # -----------------------------------------------------------------------------
-# Configuration & Setup
+# Configuration
 # -----------------------------------------------------------------------------
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 class ConsoleUX:
     @staticmethod
     def print_banner(text):
         print(f"\n{'-'*60}\n{text.center(60)}\n{'-'*60}")
-
     @staticmethod
     def log_metrics(stage, metrics):
-        log_str = f"[{stage}] "
+        log = f"[{stage}] "
         for k, v in metrics.items():
-            if isinstance(v, float):
-                log_str += f"{k}: {v:.4f} | "
-            else:
-                log_str += f"{k}: {v} | "
-        logger.info(log_str.strip(" | "))
+            val = f"{v:.4f}" if isinstance(v, float) else f"{v}"
+            log += f"{k}: {val} | "
+        logger.info(log.strip(" | "))
 
 # -----------------------------------------------------------------------------
-# OPTIMIZER UTILS: LLRD
+# Optimizer Params
 # -----------------------------------------------------------------------------
 def get_llrd_optimizer_params(model, base_lr, weight_decay=0.01, decay_factor=0.95):
     opt_parameters = []
     named_parameters = list(model.named_parameters())
-    
     no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
-    head_params_names = [n for n, p in named_parameters if "base_model" not in n]
+    head_names = [n for n, p in named_parameters if "base_model" not in n]
     
-    head_params_decay = [p for n, p in named_parameters if n in head_params_names and not any(nd in n for nd in no_decay)]
-    head_params_nodecay = [p for n, p in named_parameters if n in head_params_names and any(nd in n for nd in no_decay)]
+    # Head
+    opt_parameters.append({
+        "params": [p for n, p in named_parameters if n in head_names and not any(nd in n for nd in no_decay)],
+        "lr": base_lr, "weight_decay": weight_decay
+    })
+    opt_parameters.append({
+        "params": [p for n, p in named_parameters if n in head_names and any(nd in n for nd in no_decay)],
+        "lr": base_lr, "weight_decay": 0.0
+    })
     
-    opt_parameters.append({"params": head_params_decay, "lr": base_lr, "weight_decay": weight_decay})
-    opt_parameters.append({"params": head_params_nodecay, "lr": base_lr, "weight_decay": 0.0})
-    
+    # Backbone
     if hasattr(model, "base_model") and hasattr(model.base_model, "encoder"):
         layers = list(model.base_model.encoder.layer)
         layers.reverse()
         lr = base_lr
-        
         for layer in layers:
             lr *= decay_factor
-            decay = []
-            nodecay = []
-            for n, p in layer.named_parameters():
-                if any(nd in n for nd in no_decay):
-                    nodecay.append(p)
-                else:
-                    decay.append(p)
+            decay = [p for n, p in layer.named_parameters() if not any(nd in n for nd in no_decay)]
+            nodecay = [p for n, p in layer.named_parameters() if any(nd in n for nd in no_decay)]
             opt_parameters.append({"params": decay, "lr": lr, "weight_decay": weight_decay})
             opt_parameters.append({"params": nodecay, "lr": lr, "weight_decay": 0.0})
-            
-        embeddings_params = list(model.base_model.embeddings.parameters())
+        
+        emb_params = list(model.base_model.embeddings.parameters())
         lr *= decay_factor
-        opt_parameters.append({"params": embeddings_params, "lr": lr, "weight_decay": weight_decay})
+        opt_parameters.append({"params": emb_params, "lr": lr, "weight_decay": weight_decay})
     else:
-        backbone_params = [p for n, p in named_parameters if "base_model" in n]
-        opt_parameters.append({"params": backbone_params, "lr": base_lr * 0.8, "weight_decay": weight_decay})
-
+        # Fallback
+        backbone = [p for n, p in named_parameters if "base_model" in n]
+        opt_parameters.append({"params": backbone, "lr": base_lr * 0.8, "weight_decay": weight_decay})
+        
     return opt_parameters
 
 # -----------------------------------------------------------------------------
-# Training Routine (SIMPLIFIED FOR DEBUGGING)
+# Train Epoch
 # -----------------------------------------------------------------------------
 def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, 
-                   epoch_idx, total_epochs, accumulation_steps=1, swa_model=None, swa_scheduler=None):
+                   epoch_idx, accumulation_steps=1, swa_model=None, swa_scheduler=None):
     
     model.train()
     running_loss = 0.0
-    
-    # --- Inizializzazione Loss Functions ---
     ce_criterion = nn.CrossEntropyLoss()
-    
-    # COMMENTATO PER DEBUG: Disabilitiamo SupCon e MSE per ora
-    # supcon_criterion = metric_losses.SupConLoss(temperature=0.1).to(device)
-    # mse_criterion = nn.MSELoss()
+    mse_criterion = nn.MSELoss()
     
     optimizer.zero_grad()
-    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}", leave=False, dynamic_ncols=True)
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}", leave=False)
     
-    for step, batch in enumerate(progress_bar):
-        input_ids = batch["input_ids"].to(device, non_blocking=True)
-        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-        labels = batch["labels"].to(device, non_blocking=True)
-        stylo_feats = batch.get("stylo_feats").to(device, non_blocking=True)
+    for step, batch in enumerate(pbar):
+        # Move inputs
+        inputs = {k: v.to(device) for k, v in batch.items() if k != "has_aug"}
+        has_aug = batch.get("has_aug", torch.zeros(1)).to(device)
         
-        # Mixed Precision Context
-        with autocast(device_type='cuda', dtype=torch.float16):
-            # --- Forward Pass ---
-            # Scompattiamo, ma ignoriamo le feature per SupCon/Consistency per ora
-            logits, _, _, _ = model(
-                input_ids, attention_mask, stylo_feats, labels=None, return_embedding=True
+        with autocast('cuda', dtype=torch.float16):
+            # 1. Forward Original
+            logits, _, _, fused_emb = model(
+                inputs["input_ids"], inputs["attention_mask"], inputs.get("stylo_feats"), 
+                labels=None, return_embedding=True
             )
             
-            # --- A. Cross Entropy Loss (ONLY THIS ONE) ---
-            loss = ce_criterion(logits, labels)
+            loss_ce = ce_criterion(logits, inputs["labels"])
+            loss_cons = torch.tensor(0.0, device=device)
             
-            # --- DEBUG: Disabilitiamo le auxiliary losses per evitare il collapse ---
-            # loss_supcon = supcon_criterion(supcon_feats, labels)
-            # total_loss = loss_ce + (0.5 * loss_supcon)
-            # if "has_aug" in batch...
-            # loss = total_loss / accumulation_steps
+            # 2. Consistency Forward
+            mask_aug = (has_aug == 1)
+            if mask_aug.sum() > 0:
+                _, _, _, fused_emb_aug = model(
+                    inputs["input_ids_aug"], inputs["attention_mask_aug"], inputs.get("stylo_feats_aug"),
+                    labels=None, return_embedding=True
+                )
+                loss_cons = mse_criterion(fused_emb[mask_aug], fused_emb_aug[mask_aug])
             
-            # Scaliamo la loss per accumulation
+            # Total Loss
+            loss = loss_ce + (1.0 * loss_cons)
             loss = loss / accumulation_steps
 
-        # Backward
         scaler.scale(loss).backward()
 
         if (step + 1) % accumulation_steps == 0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            
-            if swa_model is not None and swa_scheduler is not None:
+            if swa_model:
                 swa_model.update_parameters(model)
                 swa_scheduler.step()
-            elif scheduler is not None:
+            elif scheduler:
                 scheduler.step()
         
-        current_loss = loss.item() * accumulation_steps
-        running_loss += current_loss
-        
-        progress_bar.set_postfix({
-            "Loss": f"{current_loss:.4f}",
-            "LR": f"{optimizer.param_groups[0]['lr']:.1e}"
-        })
-        
-        del input_ids, attention_mask, labels, logits, loss
+        running_loss += loss.item() * accumulation_steps
+        pbar.set_postfix({"CE": f"{loss_ce.item():.3f}", "Cons": f"{loss_cons.item():.3f}"})
 
     return {"loss": running_loss / len(dataloader)}
-     
-# -----------------------------------------------------------------------------
-# Main Execution
-# -----------------------------------------------------------------------------
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False 
-    torch.backends.cudnn.benchmark = True
 
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    set_seed(42)
     load_dotenv()
-    ConsoleUX.print_banner("SemEval 2026 - Task 13 - subtask A")
-
-    DATA_ROOT = os.getenv("DATA_PATH", "./data")
-    task_data_dir = os.path.join(DATA_ROOT, "Task_A")
+    ConsoleUX.print_banner("SemEval 2026 - Task 13 A")
     
-    # Configurazione
-    config_path = "src/src_TaskA/config/config.yaml"
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
+    # 1. Load Config
+    with open("src/src_TaskA/config/config.yaml") as f: config = yaml.safe_load(f)
+    
+    # Auto-find paths
+    base_dir = "data/Task_A"
+    if not config["data"].get("train_path"):
+        config["data"]["train_path"] = os.path.join(base_dir, "train.parquet")
+    if not config["data"].get("val_path"):
+        config["data"]["val_path"] = os.path.join(base_dir, "validation.parquet")
 
-    # Autodiscovery paths
-    train_files = [f for f in os.listdir(task_data_dir) if "train" in f and f.endswith(".parquet")]
-    val_files = [f for f in os.listdir(task_data_dir) if ("val" in f or "dev" in f) and f.endswith(".parquet")]
-
-    if train_files: config["data"]["train_path"] = os.path.join(task_data_dir, train_files[0])
-    if val_files: config["data"]["val_path"] = os.path.join(task_data_dir, val_files[0])
-
-    # Experiment Tracking
-    api_key = os.getenv("COMET_API_KEY")
-    if api_key:
-        experiment = Experiment(api_key=api_key, project_name=os.getenv("COMET_PROJECT_NAME"))
-        experiment.log_parameters(config)
-    else:
-        experiment = None
-
+    # 2. Setup Device & Logger
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Compute Device: {device}")
+    
+    # Comet
+    exp = None
+    if os.getenv("COMET_API_KEY"):
+        exp = Experiment(api_key=os.getenv("COMET_API_KEY"), project_name=os.getenv("COMET_PROJECT_NAME"))
+        exp.log_parameters(config)
 
-    # --- MODEL INIT ---
-    logger.info("Initializing Fusion Model...")
-    model = FusionCodeClassifier(config) 
-    model.to(device)
+    # 3. Model & Data
+    model = FusionCodeClassifier(config).to(device)
+    train_ds, val_ds, train_sampler, _ = load_data(config, model.tokenizer)
 
-    # Loading Data
-    train_dataset, val_dataset, train_sampler, _ = load_data(config, model.tokenizer)
-
-    num_workers = 4
+    # DataLoader
     train_dl = DataLoader(
-        train_dataset, 
-        batch_size=config["training"]["batch_size"], 
-        sampler=train_sampler,
-        num_workers=num_workers, 
-        pin_memory=True,
-        drop_last=True
+        train_ds, batch_size=config["training"]["batch_size"], 
+        sampler=train_sampler, num_workers=4, pin_memory=True, drop_last=True
     )
     
+    val_bs = config["training"]["batch_size"] * 2
     val_dl = DataLoader(
-        val_dataset, 
-        batch_size=config["training"]["batch_size"], 
-        shuffle=False, 
-        num_workers=num_workers, 
-        pin_memory=True
+        val_ds, batch_size=val_bs, shuffle=False, 
+        num_workers=4, pin_memory=True
     )
 
-    # Optimizer & Scheduler
-    grouped_params = get_llrd_optimizer_params(
-        model, 
-        base_lr=float(config["training"]["learning_rate"]),
-        weight_decay=0.01
-    )
-    optimizer = torch.optim.AdamW(grouped_params)
+    # 4. Training Setup
+    optimizer = torch.optim.AdamW(get_llrd_optimizer_params(model, float(config["training"]["learning_rate"])))
     scaler = GradScaler()
     
-    # SWA Setup
-    num_epochs = config["training"].get("num_epochs", 15)
-    swa_start_epoch = int(num_epochs * 0.75)
+    num_epochs = config["training"]["num_epochs"]
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=float(config["training"]["learning_rate"]),
+        total_steps=len(train_dl)*num_epochs, pct_start=0.1
+    )
+    
+    # SWA
     swa_model = AveragedModel(model)
     swa_scheduler = SWALR(optimizer, swa_lr=2e-6)
-    
-    # [FIX] Inizializziamo lo scheduler PRIMA del loop e UNA VOLTA SOLA
-    total_steps = len(train_dl) * num_epochs
-    main_scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=float(config["training"]["learning_rate"]),
-        total_steps=total_steps, 
-        pct_start=0.1
-    )
+    swa_start = int(num_epochs * 0.75)
 
+    # 5. Loop
     best_f1 = 0.0
-    patience = config["training"].get("early_stop_patience", 4)
-    patience_counter = 0
-    save_dir = config["training"]["checkpoint_dir"]
-    os.makedirs(save_dir, exist_ok=True)
+    save_path = config["training"]["checkpoint_dir"]
+    os.makedirs(save_path, exist_ok=True)
 
-    # --- Training Loop ---
     for epoch in range(num_epochs):
-        print(f"\n{'='*20} Epoch {epoch+1}/{num_epochs} {'='*20}")
+        print(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
+        use_swa = (epoch >= swa_start)
         
-        use_swa = (epoch >= swa_start_epoch)
-        if use_swa: logger.info(">> SWA Active Phase <<")
-        
-        train_metrics = train_one_epoch(
+        metrics = train_one_epoch(
             model, train_dl, optimizer, 
-            scheduler=None if use_swa else main_scheduler,
-            scaler=scaler, device=device, 
-            epoch_idx=epoch, total_epochs=num_epochs, 
+            None if use_swa else scheduler, scaler, device, epoch, 
+            accumulation_steps=config["training"]["gradient_accumulation_steps"],
             swa_model=swa_model if use_swa else None,
             swa_scheduler=swa_scheduler if use_swa else None
         )
-        ConsoleUX.log_metrics("Train", train_metrics)
+        ConsoleUX.log_metrics("Train", metrics)
         
         # Validation
-        eval_model = swa_model if use_swa else model
+        eval_net = swa_model if use_swa else model
         if use_swa: torch.optim.swa_utils.update_bn(train_dl, swa_model, device=device)
         
-        val_metrics, val_preds, val_refs = evaluate(eval_model, val_dl, device)
+        val_metrics, _, _ = evaluate(eval_net, val_dl, device)
         ConsoleUX.log_metrics("Valid", val_metrics)
         
-        if experiment:
-            experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
-            experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
-        
-        # Checkpointing
-        if val_metrics["f1"] > best_f1:
-            logger.info(f"New Best F1: {val_metrics['f1']:.4f}")
-            best_f1 = val_metrics["f1"]
-            patience_counter = 0
+        if exp:
+            exp.log_metrics(metrics, prefix="Train", step=epoch)
+            exp.log_metrics(val_metrics, prefix="Val", step=epoch)
             
-            save_path = os.path.join(save_dir, "best_model.pt")
-            model_to_save = swa_model.module if use_swa else model
-            torch.save(model_to_save.state_dict(), save_path)
-        else:
-            patience_counter += 1
-            if patience_counter >= patience and not use_swa:
-                logger.info("Early stopping.")
-                break
+        if val_metrics["f1"] > best_f1:
+            best_f1 = val_metrics["f1"]
+            torch.save(model.state_dict(), os.path.join(save_path, "best_model.pt"))
+            logger.info(f"Saved Best Model (F1: {best_f1:.4f})")
 
-    logger.info("Training Finished.")
+    logger.info("Done.")
