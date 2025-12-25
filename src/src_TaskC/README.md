@@ -44,6 +44,7 @@ Analisi della lunghezza degli snippet (senza outlier estremi). In task di "Mixed
 <div style="text-align:center">
   <img src="../../img/img_TaskC/Train_length_dist.png" width="45%" alt="Train Length Distribution"/>
   <img src="../../img/img_TaskC/Validation_length_dist.png" width="45%" alt="Validation Length Distribution"/>
+  <img src="../../img/img_TaskC/Test_Sample_length_dist.png" width="45%" alt="Test Length Distribution"/>
 </div>
 
 <br>
@@ -54,6 +55,7 @@ Panoramica dei linguaggi coinvolti nel task di modifica/generazione ibrida.
 <div style="text-align:center">
   <img src="../../img/img_TaskC/Train_languages.png" width="45%" alt="Train Languages"/>
   <img src="../../img/img_TaskC/Validation_languages.png" width="45%" alt="Validation Languages"/>
+  <img src="../../img/img_TaskC/Test_Sample_languages.png" width="45%" alt="Test Languages"/>
 </div>
 
 Queste informazioni aiutano a definire:

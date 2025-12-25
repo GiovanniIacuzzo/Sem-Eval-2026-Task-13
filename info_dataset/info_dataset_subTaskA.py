@@ -11,7 +11,7 @@ load_dotenv()
 # Path
 # ---------------------------------------
 data_path = os.getenv("DATA_PATH")
-img_path = os.getenv("IMG_PATH", "./img_TaskA")
+img_path = os.getenv("IMG_PATH", "./img/img_TaskA")
 os.makedirs(img_path, exist_ok=True)
 
 files = {

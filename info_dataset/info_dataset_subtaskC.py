@@ -12,7 +12,7 @@ load_dotenv()
 # Base paths
 BASE_DATA_PATH = os.getenv("DATA_PATH", "./data")
 TASK_C_DIR = os.path.join(BASE_DATA_PATH, "Task_C")
-IMG_PATH = os.getenv("IMG_PATH", "./img_TaskC")
+IMG_PATH = os.getenv("IMG_PATH", "./img/img_TaskC")
 
 # Ensure output directory exists
 os.makedirs(IMG_PATH, exist_ok=True)
@@ -21,7 +21,7 @@ os.makedirs(IMG_PATH, exist_ok=True)
 FILES = {
     "Train": "train.parquet",
     "Validation": "validation.parquet",
-    "Test": "test.parquet"
+    "Test": "test_sample.parquet"
 }
 
 # -----------------------------------------------------------------------------

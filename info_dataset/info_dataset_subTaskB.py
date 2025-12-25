@@ -12,17 +12,43 @@ load_dotenv()
 # Base paths
 BASE_DATA_PATH = os.getenv("DATA_PATH", "./data")
 TASK_B_DIR = os.path.join(BASE_DATA_PATH, "Task_B")
-IMG_PATH = os.getenv("IMG_PATH", "./img_TaskB")
+IMG_PATH = os.getenv("IMG_PATH", "img/img_TaskB")
 
 # Ensure output directory exists
 os.makedirs(IMG_PATH, exist_ok=True)
 
-# File configuration
 FILES = {
     "Train": "train.parquet",
     "Validation": "validation.parquet",
-    "Test": "test.parquet"
+    "Test": "test_sample.parquet"
 }
+
+# -----------------------------------------------------------------------------
+# Label Normalization Logic
+# -----------------------------------------------------------------------------
+def map_to_family(model_name: str) -> str:
+    """
+    Mappa le 31 varianti specifiche in 11 famiglie di modelli principali.
+    Logica basata sulla presenza di sottostringhe.
+    """
+    if pd.isna(model_name):
+        return "unknown"
+        
+    name = str(model_name).lower().strip()
+
+    if 'llama' in name: return 'llama'
+    if 'gpt' in name: return 'gpt'
+    if 'mistral' in name or 'mixtral' in name: return 'mistral'
+    if 'gemma' in name: return 'gemma'
+    if 'claude' in name: return 'claude'
+    if 'qwen' in name: return 'qwen'
+    if 'phi' in name: return 'phi'
+    if 'deepseek' in name: return 'deepseek'
+    if 'starcoder' in name: return 'starcoder'
+    if 'yi' in name: return 'yi'
+    if 'gemini' in name: return 'gemini'
+    
+    return name
 
 # -----------------------------------------------------------------------------
 # Data Loading & Preprocessing
@@ -47,25 +73,23 @@ def load_and_preprocess(file_name: str) -> pd.DataFrame:
     
     if 'generator' in df.columns:
         df['generator'] = df['generator'].str.lower().str.strip()
+        
+        print(f"   -> Mapping generators (original unique: {df['generator'].nunique()})...")
+        df['generator'] = df['generator'].apply(map_to_family)
+        print(f"   -> Mapped to families (new unique: {df['generator'].nunique()})")
     
-    # 2. Feature Engineering Avanzata
+    # 2. Feature Engineering
     if 'code' in df.columns:
-        # Lunghezza in caratteri
         df['char_length'] = df['code'].str.len()
-        
-        # Lunghezza in linee (utile: alcuni LLM sono più "verticali" di altri)
         df['line_count'] = df['code'].str.count('\n') + 1
-        
-        # Lunghezza in token (approssimazione splitting per spazi)
         df['token_count_approx'] = df['code'].apply(lambda x: len(str(x).split()))
 
-        # Rimuovi snippet vuoti o nulli
+        # Rimuovi snippet vuoti
         initial_len = len(df)
         df = df[df['char_length'] > 0].copy()
         if len(df) < initial_len:
             print(f"   -> Removed {initial_len - len(df)} empty rows.")
 
-        # Preview per display
         df['code_preview'] = df['code'].str[:100].str.replace('\n', '\\n')
     
     return df
@@ -77,82 +101,48 @@ def eda_dataset(df: pd.DataFrame, dataset_name: str):
     if df is None: return
 
     print(f"\n{'='*60}\nEDA REPORT: {dataset_name}\n{'='*60}")
-    
-    # 1. General Stats
     print(f"Total Samples: {len(df)}")
     
-    # Check duplicati
     if 'code' in df.columns:
         num_dupes = df.duplicated(subset=['code']).sum()
         if num_dupes > 0:
-            print(f"\n[WARNING] Found {num_dupes} duplicate code snippets! ({num_dupes/len(df):.2%})")
-        else:
-            print("\n[OK] No exact duplicate code snippets found.")
+            print(f"[WARNING] Found {num_dupes} duplicate snippets.")
 
-    print("\n--- Data Sample ---")
-    # Mostra colonne disponibili dinamicamente
-    cols_available = [c for c in ['generator', 'language', 'line_count', 'code_preview'] if c in df.columns]
-    print(df[cols_available].head())
-    
-    # 2. Class Distribution (Solo se abbiamo le label)
+    # 2. Class Distribution
     if 'generator' in df.columns:
-        print("\n--- Class Distribution (Top 10) ---")
+        print("\n--- Class Distribution (Families) ---")
         class_counts = df['generator'].value_counts()
-        print(class_counts.head(10))
+        print(class_counts)
+        print(f"Total Labels Found: {len(class_counts)}")
         
-        balance_ratio = class_counts.min() / class_counts.max()
-        print(f"\nClass Balance Ratio (Min/Max): {balance_ratio:.4f}")
-        if balance_ratio < 0.1:
-            print("[ALERT] Dataset is heavily imbalanced!")
-
-    # 3. Stats sulle lunghezze
-    print("\n--- Length Statistics (Tokens Approx) ---")
-    print(df['token_count_approx'].describe())
+        if len(class_counts) != 11 and dataset_name != "Test":
+            print(f"[NOTE] Attenzione: Trovate {len(class_counts)} label invece di 11.")
 
     # ---------------------------------------
     # Visualizations
     # ---------------------------------------
     sns.set_theme(style="whitegrid")
-    palette = "viridis"
-
-    # --- PLOT GENERICI (Funzionano anche per TEST set senza label) ---
     
-    # Plot 1: Istogramma distribuzione lunghezza (Generale)
-    plt.figure(figsize=(10, 6))
-    # Taglio al 95% per leggibilità
-    limit = df['token_count_approx'].quantile(0.95)
-    viz_df = df[df['token_count_approx'] < limit]
-    
-    sns.histplot(viz_df['token_count_approx'], bins=50, kde=True, color="teal")
-    plt.title(f"Token Count Distribution (General) - {dataset_name}")
-    plt.xlabel("Tokens (Approx)")
-    plt.tight_layout()
-    plt.savefig(os.path.join(IMG_PATH, f"{dataset_name}_token_dist_general.png"))
-    plt.close()
-
-    # --- PLOT SPECIFICI (Solo per TRAIN/VAL con label) ---
-
-    # Plot A: Class Balance
+    # Plot A: Class Balance (Aggiornato per le famiglie)
     if 'generator' in df.columns:
         plt.figure(figsize=(12, 6))
-        class_counts = df['generator'].value_counts()
-        top_classes = class_counts.head(20).index
-        sns.countplot(data=df[df['generator'].isin(top_classes)], x='generator', order=top_classes, palette=palette, hue='generator', legend=False)
-        plt.title(f"Generator Distribution (Top 20) - {dataset_name}")
+        sns.countplot(data=df, x='generator', order=df['generator'].value_counts().index, palette="viridis", hue='generator', legend=False)
+        plt.title(f"Model Family Distribution - {dataset_name}")
         plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
         plt.savefig(os.path.join(IMG_PATH, f"{dataset_name}_class_dist.png"))
         plt.close()
 
-    # Plot B: Token Length vs Generator
+    # Plot B: Token Length vs Generator Family
     if 'generator' in df.columns:
         plt.figure(figsize=(14, 8))
         limit = df['token_count_approx'].quantile(0.95)
         viz_df = df[df['token_count_approx'] < limit]
+        
         order = viz_df.groupby('generator')['token_count_approx'].median().sort_values(ascending=False).index
         
         sns.boxplot(data=viz_df, x='generator', y='token_count_approx', order=order, palette="coolwarm", hue='generator', legend=False)
-        plt.title(f"Token Count by Generator - {dataset_name}")
+        plt.title(f"Token Count by Model Family - {dataset_name}")
         plt.xticks(rotation=45, ha='right')
         plt.tight_layout()
         plt.savefig(os.path.join(IMG_PATH, f"{dataset_name}_token_boxplot.png"))
@@ -160,19 +150,19 @@ def eda_dataset(df: pd.DataFrame, dataset_name: str):
 
     # Plot C: Heatmap
     if 'generator' in df.columns and 'language' in df.columns:
-        plt.figure(figsize=(12, 10))
-        top_langs = df['language'].value_counts().head(15).index
+        plt.figure(figsize=(12, 8))
+        top_langs = df['language'].value_counts().head(10).index
         filtered_df = df[df['language'].isin(top_langs)]
+        
         crosstab = pd.crosstab(filtered_df['generator'], filtered_df['language'], normalize='index')
         sns.heatmap(crosstab, annot=True, fmt='.2f', cmap="Blues", cbar_kws={'label': 'Probability'})
-        plt.title(f"Generator vs Language Probability - {dataset_name}")
+        plt.title(f"Model Family vs Language Probability - {dataset_name}")
         plt.tight_layout()
         plt.savefig(os.path.join(IMG_PATH, f"{dataset_name}_heatmap_norm.png"))
         plt.close()
 
     print(f"Images saved to {IMG_PATH}")
     
-    # Helper for Map
     if dataset_name == "Train" and 'generator' in df.columns:
         print("\n" + "="*50)
         print("COPY THIS MAP TO src/dataset/dataset.py")
@@ -184,18 +174,16 @@ def eda_dataset(df: pd.DataFrame, dataset_name: str):
         print("}")
         print(f"NUM_LABELS = {len(generators)}")
         print("="*50 + "\n")
+
 # -----------------------------------------------------------------------------
 # Main Execution
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Load Train
     train_df = load_and_preprocess(FILES["Train"])
     eda_dataset(train_df, "Train")
 
-    # Load Validation
     val_df = load_and_preprocess(FILES["Validation"])
     eda_dataset(val_df, "Validation")
 
-    # Test Validation
     test_df = load_and_preprocess(FILES["Test"])
     eda_dataset(test_df, "Test")

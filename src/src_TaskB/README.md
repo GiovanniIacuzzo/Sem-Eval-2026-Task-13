@@ -37,6 +37,7 @@ Evidenzia il forte sbilanciamento verso la classe *Human* e le differenze di fre
 <div style="text-align:center">
   <img src="../../img/img_TaskB/Train_class_dist.png" width="45%" alt="Train Class Distribution"/>
   <img src="../../img/img_TaskB/Validation_class_dist.png" width="45%" alt="Validation Class Distribution"/>
+  <img src="../../img/img_TaskB/Test_class_dist.png" width="45%" alt="Test Class Distribution"/>
 </div>
 
 <br>
@@ -47,6 +48,7 @@ Confronto della lunghezza media dei codici prodotti. I Boxplot (ordinati per med
 <div style="text-align:center">
   <img src="../../img/img_TaskB/Train_token_boxplot.png" width="45%" alt="Train Token Boxplot"/>
   <img src="../../img/img_TaskB/Validation_token_boxplot.png" width="45%" alt="Validation Token Boxplot"/>
+  <img src="../../img/img_TaskB/Test_token_boxplot.png" width="45%" alt="Test Token Boxplot"/>
 </div>
 
 <br>
@@ -57,6 +59,7 @@ Mostra la probabilità condizionata che un certo generatore produca codice in un
 <div style="text-align:center">
   <img src="../../img/img_TaskB/Train_heatmap_norm.png" width="45%" alt="Train Heatmap"/>
   <img src="../../img/img_TaskB/Validation_heatmap_norm.png" width="45%" alt="Validation Heatmap"/>
+  <img src="../../img/img_TaskB/Test_heatmap_norm.png" width="45%" alt="Test Heatmap"/>
 </div>
 
 Queste informazioni aiutano a capire:
