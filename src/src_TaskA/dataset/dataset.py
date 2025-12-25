@@ -104,7 +104,7 @@ class CodeDataset(Dataset):
         if self.stylo_extractor:
             stylo = self.stylo_extractor.extract(code)
         else:
-            stylo = np.zeros(13, dtype=np.float32)
+            stylo = np.zeros(15, dtype=np.float32)
 
         item = {
             "input_ids": enc["input_ids"].squeeze(0),

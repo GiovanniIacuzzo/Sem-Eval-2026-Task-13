@@ -69,7 +69,7 @@ class FusionCodeClassifier(nn.Module):
         self.model_name = model_cfg.get("model_name", "microsoft/unixcoder-base")
         self.num_labels = 2
         
-        self.stylo_input_dim = config.get("data", {}).get("stylo_feature_dim", 13)
+        self.stylo_input_dim = config.get("data", {}).get("stylo_feature_dim", 15)
         
         print(f"Loading backbone: {self.model_name}")
         self.base_model = AutoModel.from_pretrained(self.model_name)

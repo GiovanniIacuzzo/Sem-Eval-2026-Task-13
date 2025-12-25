@@ -83,39 +83,29 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
     model.train()
     running_loss = 0.0
     ce_criterion = nn.CrossEntropyLoss()
-    mse_criterion = nn.MSELoss()
     
     optimizer.zero_grad()
     pbar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}", leave=False)
     
     for step, batch in enumerate(pbar):
-        # Move inputs
-        inputs = {k: v.to(device) for k, v in batch.items() if k != "has_aug"}
-        has_aug = batch.get("has_aug", torch.zeros(1)).to(device)
+        # Sposta tutto su GPU
+        inputs = {k: v.to(device) for k, v in batch.items()}
         
         with autocast('cuda', dtype=torch.float16):
-            # 1. Forward Original
-            logits, _, _, fused_emb = model(
-                inputs["input_ids"], inputs["attention_mask"], inputs.get("stylo_feats"), 
-                labels=None, return_embedding=True
+            # Forward
+            logits, loss = model(
+                inputs["input_ids"], 
+                inputs["attention_mask"], 
+                inputs.get("stylo_feats"), 
+                labels=inputs["labels"]
             )
             
-            loss_ce = ce_criterion(logits, inputs["labels"])
-            loss_cons = torch.tensor(0.0, device=device)
-            
-            # 2. Consistency Forward
-            mask_aug = (has_aug == 1)
-            if mask_aug.sum() > 0:
-                _, _, _, fused_emb_aug = model(
-                    inputs["input_ids_aug"], inputs["attention_mask_aug"], inputs.get("stylo_feats_aug"),
-                    labels=None, return_embedding=True
-                )
-                loss_cons = mse_criterion(fused_emb[mask_aug], fused_emb_aug[mask_aug])
-            
-            # Total Loss
-            loss = loss_ce + (1.0 * loss_cons)
+            if loss is None:
+                loss = ce_criterion(logits, inputs["labels"])
+
             loss = loss / accumulation_steps
 
+        # Backward
         scaler.scale(loss).backward()
 
         if (step + 1) % accumulation_steps == 0:
@@ -131,7 +121,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
                 scheduler.step()
         
         running_loss += loss.item() * accumulation_steps
-        pbar.set_postfix({"CE": f"{loss_ce.item():.3f}", "Cons": f"{loss_cons.item():.3f}"})
+        pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
 
     return {"loss": running_loss / len(dataloader)}
 
