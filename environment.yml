@@ -32,3 +32,4 @@ dependencies:
       - bitsandbytes
       - protobuf
       - scikit-learn
+      - kaggle
