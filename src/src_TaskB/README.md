@@ -67,6 +67,56 @@ Queste informazioni aiutano a capire:
 
 ---
 
+## 🚀 Istruzioni per l'Esecuzione
+
+### 1. Addestramento
+
+Per avviare la training pipeline con logging su console, TensorBoard e CometML:
+```bash
+python -m src.src_TaskB.train
+```
+
+L'output includerà una progress bar con metriche in tempo reale. Il miglior modello (basato su Macro-F1) verrà salvato automaticamente in `results/results_TaskB/checkpoints/`.
+
+### 2. Inferenza e Sottomissione
+
+Per generare il file `submission_task_b.csv` valido per la leaderboard:
+```bash
+python -m src.src_TaskB.generate_submission
+```
+Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle sottocartelle di download Kaggle) e genera il file in `results/results_TaskB/submission/submission_task_b.csv`.
+
+---
+
+## 📊 Struttura del Progetto Sub Task-B
+
+```bash
+├── 📁 src
+│   └── 📁 src_TaskB
+│       ├── 📁 config
+│       │   └── ⚙️ config.yaml
+│       │
+│       ├── 📁 dataset
+│       │   ├── 🐍 Inference_dataset.py
+│       │   ├── 🐍 dataset.py
+│       │   └── 🐍 prepare_split_data.py
+│       │
+│       ├── 📁 models
+│       │   └── 🐍 model.py
+│       │
+│       ├── 📁 utils
+│       │   └── 🐍 utils.py
+│       │
+│       ├── 📝 README.md
+│       │
+│       ├── 🐍 generate_submission.py
+│       ├── 🐍 inference.py
+│       │
+│       └── 🐍 train.py
+```
+
+---
+
 > [!CAUTION]
 > README ANCORA IN FASE DI SVILUPPO...
 

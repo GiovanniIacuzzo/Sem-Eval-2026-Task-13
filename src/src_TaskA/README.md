@@ -60,57 +60,67 @@ Queste informazioni aiutano a capire:
 
 ---
 
-## 🧠 Architettura del Modello e Strategia
-
-> [!CAUTION]
-> README ANCORA IN FASE DI SVILUPPO...
-
----
-
 ## 🚀 Istruzioni per l'Esecuzione
 
-Il progetto include script di automazione per garantire un setup rapido e riproducibile.
-
-### 1. Setup dell'Ambiente
-Esegui lo script di preparazione che creerà la struttura delle directory, il file `.env` e l'ambiente Conda ottimizzato:
-
-```bash
-chmod +x prepare.sh
-./prepare.sh
-conda activate semeval
-```
-
-### 2. Configurazione
-
-Tutti i parametri (iperparametri, path, device) sono centralizzati in `src/config/config.yaml`.
-
-> [!NOTE]
-> Assicurati di impostare correttamente `DATA_PATH` nel file `.env` generato automaticamente dallo script.
-
-### 3. Addestramento
+### 1. Addestramento
 
 Per avviare la training pipeline con logging su console, TensorBoard e CometML:
 ```bash
-python -m src_TaskA.train
+python -m src.src_TaskA.train
 ```
 
-L'output includerà una progress bar con metriche in tempo reale. Il miglior modello (basato su Macro-F1) verrà salvato automaticamente in `results/checkpoints/`.
+L'output includerà una progress bar con metriche in tempo reale. Il miglior modello (basato su Macro-F1) verrà salvato automaticamente in `results/results_TaskA/checkpoints/`.
 
-### 4. Inferenza e Sottomissione
+### 2. Inferenza e Sottomissione
 
-Per generare il file `submission.csv` valido per la leaderboard:
+Per generare il file `submission_task_a.csv` valido per la leaderboard:
 ```bash
-python -m src_TASKA.generate_submission
+python -m src.src_TaskA.generate_submission
 ```
-Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle sottocartelle di download Kaggle) e genera il file in `results/submission/submission_task_a.csv`.
+Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle sottocartelle di download Kaggle) e genera il file in `results/results_TaskA/submission/submission_task_a.csv`.
 
 ---
 
 ## 📊 Struttura del Progetto Sub Task-A
 
 ```bash
- IN FASE DI SVILUPPO
+├── 📁 src
+│   └── 📁 src_TaskA
+│       ├── 📁 config
+│       │   └── ⚙️ config.yaml
+│       │
+│       ├── 📁 dataset
+│       │   ├── 🐍 Inference_dataset.py
+│       │   └── 🐍 dataset.py
+│       │
+│       ├── 📁 features
+│       │   └── 🐍 stylometry.py
+│       │
+│       ├── 📁 models
+│       │   └── 🐍 model.py
+│       │
+│       ├── 📁 scripts
+│       │   ├── 🐍 augment_data.py
+│       │   └── 🐍 debug_data.py
+│       │
+│       ├── 📁 utils
+│       │   └── 🐍 utils.py
+│       │
+│       ├── 📝 README.md
+│       │
+│       ├── 🐍 generate_submission.py
+│       ├── 🐍 inference.py
+│       │
+│       └── 🐍 train.py
 ```
+
+---
+
+## 🧠 Architettura del Modello e Strategia
+
+> [!CAUTION]
+> README ANCORA IN FASE DI SVILUPPO...
+
 
 --- 
 

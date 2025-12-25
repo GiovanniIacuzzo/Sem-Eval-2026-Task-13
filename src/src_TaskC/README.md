@@ -62,6 +62,55 @@ Queste informazioni aiutano a definire:
 - Come gestire la **lunghezza del contesto** nei modelli Transformer (es. snippet molto lunghi potrebbero richiedere sliding windows).
 - La strategia di **Data Augmentation** necessaria per coprire linguaggi meno rappresentati.
 
+---
+
+
+## 🚀 Istruzioni per l'Esecuzione
+
+### 1. Addestramento
+
+Per avviare la training pipeline con logging su console, TensorBoard e CometML:
+```bash
+python -m src.src_TaskC.train
+```
+
+L'output includerà una progress bar con metriche in tempo reale. Il miglior modello (basato su Macro-F1) verrà salvato automaticamente in `results/results_TaskC/checkpoints/`.
+
+### 2. Inferenza e Sottomissione
+
+Per generare il file `submission_task_c.csv` valido per la leaderboard:
+```bash
+python -m src.src_TaskC.generate_submission
+```
+Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle sottocartelle di download Kaggle) e genera il file in `results/results_TaskC/submission/submission_task_c.csv`.
+
+---
+
+## 📊 Struttura del Progetto Sub Task-C
+
+```bash
+├── 📁 src
+│   └── 📁 src_TaskC
+│       ├── 📁 config
+│       │   └── ⚙️ config.yaml
+│       │
+│       ├── 📁 dataset
+│       │   ├── 🐍 Inference_dataset.py
+│       │   └── 🐍 dataset.py
+│       │
+│       ├── 📁 models
+│       │   └── 🐍 model.py
+│       │
+│       ├── 📁 utils
+│       │   └── 🐍 utils.py
+│       │
+│       ├── 📝 README.md
+│       │
+│       ├── 🐍 generate_submission.py
+│       ├── 🐍 inference.py
+│       │
+│       └── 🐍 train.py
+```
 
 ---
 

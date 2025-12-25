@@ -24,26 +24,37 @@ L'organizzazione delle cartelle è progettata per separare i dati, le immagini d
 
 ```bash
 .
-├── data/                 # Dataset (parquet) divisi per Task
-├── img/                  # Output visivi degli script di analisi (EDA)
-│   ├── img_TaskA/        # Plot specifici per Task A
-│   ├── img_TaskB/        # Plot specifici per Task B
-│   └── img_TaskC/        # Plot specifici per Task C
+├── 📁 data/                    # Dataset (parquet) divisi per Task
+├── 📁 img/                     # Output visivi degli script di analisi (EDA)
+│   ├── 📁 img_TaskA/           # Plot specifici per Task A
+│   ├── 📁 img_TaskB/           # Plot specifici per Task B
+│   └── 📁 img_TaskC/           # Plot specifici per Task C
 │
-├── info_dataset/         # Script per l'analisi statistica dei dati
-│   ├── info_dataset_subTaskA.py
-│   ├── info_dataset_subTaskB.py
-│   └── info_dataset_subtaskC.py
+├── 📁 info_dataset/            # Script per l'analisi statistica dei dati
+│   ├── 🐍 info_dataset_subTaskA.py
+│   ├── 🐍 info_dataset_subTaskB.py
+│   └── 🐍 info_dataset_subtaskC.py
 │
-├── src/                  # Codice sorgente dei modelli
-│   ├── src_TaskA/        # Pipeline completa per Subtask A
-│   ├── src_TaskB/        # Pipeline completa per Subtask B
-│   └── src_TaskC/        # Pipeline completa per Subtask C
+├── 📁 src/                     # Codice sorgente dei modelli
+│   ├── 📁 src_TaskA/           # Pipeline completa per Subtask A
+│   ├── 📁 src_TaskB/           # Pipeline completa per Subtask B
+│   └── 📁 src_TaskC/           # Pipeline completa per Subtask C
 │
-├── prepare.sh            # Script di automazione setup (creazione cartelle e env)
-├── environment.yml       # Dipendenze Conda condivise
-└── .env                  # Variabili d'ambiente (generato da prepare.sh)
+├── 🐍 data.py                  # Scarica il dataset a scelta da kaggle
+│
+├── 📝 README.md
+├── 📄 prepare.sh               # Script di automazione setup (creazione cartelle e env)
+├── ⚙️ environment.yml          # Dipendenze Conda condivise
+└── ⚙️ .env                     # Variabili d'ambiente (generato da prepare.sh)
 ```
+
+> [!IMPORTANT]
+> Ricordati di generare il `kaggle.json` dal tuo account kaggle:
+>
+> ```bash
+> {"username":"la_tua_username","key":"la_chiave_che_ti_fornisce_kaggle"}
+> ```
+> 
 
 ---
 
@@ -91,6 +102,19 @@ COMET_PROJECT_NAME=comet_project_name
 COMET_WORKSPACE=comet_name_workspace
 COMET_EXPERIMENT_NAME=comet_experment_name
 ```
+
+### 5. Download Dataset
+
+Ricordati di scaricare le dipendenze di kaggle in caso non sia fatto:
+```bash
+pip install kaggle
+```
+
+Scarica il dataset che preferisci da:
+```bash
+python data.py
+```
+modifica `competition_name` inserendo il dataset che desideri scaricare da kaggle. In automatico viene scaricato il dataset nella cartella `data`.
 
 ---
 
