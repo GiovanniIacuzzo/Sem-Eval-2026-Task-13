@@ -106,7 +106,7 @@ def build_prompt_chat(code, target_lang):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_path", type=str, default="data/Task_A/train.parquet")
-    parser.add_argument("--output_path", type=str, default="data/Task_A/train_augmented_ood.parquet")
+    parser.add_argument("--output_path", type=str, default="data/Task_A/train_augmented.parquet")
     parser.add_argument("--num_samples", type=int, default=10000) 
     args = parser.parse_args()
 

@@ -73,7 +73,11 @@ Queste informazioni aiutano a capire:
 
 Per avviare la training pipeline con logging su console, TensorBoard e CometML:
 ```bash
-python -m src.src_TaskB.train
+python -m src.src_TaskB.train.binary
+```
+Successivamente dopo aver fatto il train binario dovrai:
+```bash
+python -m src.src_TaskB.train.families
 ```
 
 L'output includerà una progress bar con metriche in tempo reale. Il miglior modello (basato su Macro-F1) verrà salvato automaticamente in `results/results_TaskB/checkpoints/`.
