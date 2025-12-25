@@ -34,6 +34,7 @@ A differenza dei task precedenti, qui potremmo osservare distribuzioni continue 
 <div style="text-align:center">
   <img src="../../img/img_TaskC/Train_target_dist.png" width="45%" alt="Train Target Distribution"/>
   <img src="../../img/img_TaskC/Validation_target_dist.png" width="45%" alt="Validation Target Distribution"/>
+  <img src="../../img/img_TaskC/Test_Sample_target_dist.png" width="45%" alt="Test Target Distribution"/>
 </div>
 
 <br>
