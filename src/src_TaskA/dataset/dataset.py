@@ -5,6 +5,7 @@ import torch
 import numpy as np
 from typing import Dict, List, Iterator
 from torch.utils.data import Dataset, Sampler
+from src.src_TaskA.features.stylometry import StylometryExtractor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -74,12 +75,8 @@ class CodeDataset(Dataset):
         self.language_map = language_map
         self.max_length = max_length
         self.augment = augment
-        
-        try:
-            from src.src_TaskA.features.stylometry import StylometryExtractor
-            self.stylo_extractor = StylometryExtractor()
-        except ImportError:
-            self.stylo_extractor = None
+        self.stylo_extractor = StylometryExtractor()
+
 
         self.labels_list = self.data['label'].astype(int).tolist()
         self.has_paired_data = 'aug_code' in self.data.columns
@@ -103,31 +100,19 @@ class CodeDataset(Dataset):
         lang_id = self.language_map.get(lang_str, self.language_map.get('unknown', 0))
 
         enc = self._tokenize(code)
-        stylo = self.stylo_extractor.extract(code) if self.stylo_extractor else np.zeros(13, dtype=np.float32)
+        
+        if self.stylo_extractor:
+            stylo = self.stylo_extractor.extract(code)
+        else:
+            stylo = np.zeros(13, dtype=np.float32)
 
         item = {
             "input_ids": enc["input_ids"].squeeze(0),
             "attention_mask": enc["attention_mask"].squeeze(0),
             "stylo_feats": torch.tensor(stylo, dtype=torch.float32),
             "labels": torch.tensor(label, dtype=torch.long),
-            "lang_ids": torch.tensor(lang_id, dtype=torch.long)
         }
 
-        # Gestione Augmentation (Consistency Loss)
-        if self.has_paired_data and pd.notna(self.data.at[idx, "aug_code"]):
-            aug_code = self._clean_code(self.data.at[idx, "aug_code"])
-            aug_enc = self._tokenize(aug_code)
-            aug_stylo = self.stylo_extractor.extract(aug_code) if self.stylo_extractor else np.zeros(13, dtype=np.float32)
-            item["input_ids_aug"] = aug_enc["input_ids"].squeeze(0)
-            item["attention_mask_aug"] = aug_enc["attention_mask"].squeeze(0)
-            item["stylo_feats_aug"] = torch.tensor(aug_stylo, dtype=torch.float32)
-            item["has_aug"] = torch.tensor(1, dtype=torch.long)
-        else:
-            item["input_ids_aug"] = torch.zeros_like(item["input_ids"])
-            item["attention_mask_aug"] = torch.zeros_like(item["attention_mask"])
-            item["stylo_feats_aug"] = torch.zeros_like(item["stylo_feats"])
-            item["has_aug"] = torch.tensor(0, dtype=torch.long)
-        
         return item
 
 # -----------------------------------------------------------------------------
@@ -156,10 +141,31 @@ def smart_balance_dataset(df: pd.DataFrame, max_python_samples: int = 30000) -> 
     df_python = df[df['language'] == 'python']
     df_others = df[df['language'] != 'python']
     
-    logger.info(f"Balancing: Python={len(df_python)} | Others (Go, C#, etc.)={len(df_others)}")
+    logger.info(f"Balancing Logic: Python Total={len(df_python)} | Others (Keep All)={len(df_others)}")
     
     if len(df_python) > max_python_samples:
-        df_python = df_python.sample(n=max_python_samples, random_state=42)
+        # STRATEGIA DI PRIORITÀ:
+        if 'aug_code' in df_python.columns:
+            # Righe con augmentation
+            df_py_priority = df_python[df_python['aug_code'].notna() & (df_python['aug_code'] != "")]
+            # Righe senza augmentation
+            df_py_rest = df_python[~df_python.index.isin(df_py_priority.index)]
+            
+            logger.info(f"   -> Found {len(df_py_priority)} Python samples with augmentation.")
+            
+            if len(df_py_priority) >= max_python_samples:
+                # Caso A: Abbiamo troppi dati augmentati, ne prendiamo un sottoinsieme
+                df_python = df_py_priority.sample(n=max_python_samples, random_state=42)
+            else:
+                # Caso B: Prendiamo tutti i prioritari e riempiamo il resto con casuali
+                needed = max_python_samples - len(df_py_priority)
+                if len(df_py_rest) > needed:
+                    df_py_rest_sampled = df_py_rest.sample(n=needed, random_state=42)
+                    df_python = pd.concat([df_py_priority, df_py_rest_sampled])
+                else:
+                    df_python = pd.concat([df_py_priority, df_py_rest])
+        else:
+            df_python = df_python.sample(n=max_python_samples, random_state=42)
         
     return pd.concat([df_python, df_others]).sample(frac=1, random_state=42).reset_index(drop=True)
 
@@ -186,11 +192,8 @@ def load_data(config: dict, tokenizer):
         
         df_new_langs['code'] = aug_raw['aug_code']
         df_new_langs['language'] = aug_raw['aug_lang']
+        df_new_langs['label'] = 1         
         df_new_langs['aug_code'] = aug_raw['code']
-        
-        df_new_langs = df_new_langs[['code', 'label', 'language', 'aug_code']]
-        df_new_langs = df_new_langs.dropna(subset=['code'])
-        df_new_langs = df_new_langs[df_new_langs['code'].str.len() > 10]
         
         logger.info(f"Injecting {len(df_new_langs)} samples of NEW languages (Go, C#, PHP...) into training!")
         
