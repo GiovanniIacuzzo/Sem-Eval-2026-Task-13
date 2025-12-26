@@ -112,7 +112,7 @@ class CodeClassifier(nn.Module):
         self.use_lora = model_cfg.get("use_lora", True) and PEFT_AVAILABLE
         
         if self.use_lora:
-            print(f"🚀 Activating LoRA (Rank 32)...")
+            print(f"Activating LoRA...")
             peft_config = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION, 
                 inference_mode=False, 

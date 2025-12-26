@@ -7,8 +7,7 @@ import numpy as np
 import argparse
 import gc
 from torch.utils.data import DataLoader
-from torch.amp import autocast
-from torch.cuda.amp import GradScaler
+from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 from dotenv import load_dotenv
 from sklearn.model_selection import StratifiedKFold
