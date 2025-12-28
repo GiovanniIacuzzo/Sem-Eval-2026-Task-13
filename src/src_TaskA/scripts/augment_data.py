@@ -134,7 +134,7 @@ def main():
     model, tokenizer = get_model()
     
     # --- TARGET ---
-    target_langs = ["c#", "javascript", "go", "c", "php"] 
+    target_langs = ["java", "c++"] 
     
     augmented_rows = []
     

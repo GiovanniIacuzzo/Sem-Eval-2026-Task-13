@@ -237,3 +237,56 @@ def load_data(config: dict, tokenizer):
     train_sampler = BalancedBatchSampler(train_ds.labels_list, batch_size=config["training"]["batch_size"])
     
     return train_ds, val_ds, train_sampler, train_df
+
+# -----------------------------------------------------------------------------
+# Data Loader Helper per K-Fold
+# -----------------------------------------------------------------------------
+def load_full_data_for_kfold(config):
+    """
+    Carica Train + Validation + Augmented Data in un unico DataFrame.
+    """
+    logger.info(">>> Merging Data for K-Fold Strategy <<<")
+    
+    # 1. Load Train Base
+    train_path = config["data"]["train_path"]
+    df_train = load_and_preprocess(train_path)
+    
+    # 2. Load Augmentation (Opzionale, come nel tuo codice originale)
+    aug_path = config["data"].get("aug_path", train_path.replace("train.parquet", "train_augmented.parquet"))
+    if os.path.exists(aug_path):
+        logger.info(f"Injecting Augmented Data from {aug_path}")
+        aug_raw = pd.read_parquet(aug_path)
+        
+        # Normalizzazione nomi colonne augmentation
+        rename_map = {}
+        if 'original_code' in aug_raw.columns: rename_map['original_code'] = 'code'
+        if 'augmented_code' in aug_raw.columns: rename_map['augmented_code'] = 'aug_code'
+        if rename_map: aug_raw = aug_raw.rename(columns=rename_map)
+        
+        df_new_langs = aug_raw.copy()
+        if 'aug_code' in df_new_langs.columns:
+            df_new_langs['code'] = df_new_langs['aug_code']
+            df_new_langs['label'] = 1
+        
+        df_train = pd.concat([df_train, df_new_langs], ignore_index=True)
+        df_train = df_train.drop_duplicates(subset=['code']).reset_index(drop=True)
+
+    # 3. Load Validation Originale e unisci
+    val_path = config["data"]["val_path"]
+    df_val = load_and_preprocess(val_path)
+    
+    full_df = pd.concat([df_train, df_val]).reset_index(drop=True)
+    
+    # Pulizia base
+    full_df = full_df.dropna(subset=['code', 'label'])
+    full_df['label'] = full_df['label'].astype(int)
+    
+    if config["data"].get("cap_python", True):
+        df_py = full_df[full_df['language'] == 'python']
+        df_others = full_df[full_df['language'] != 'python']
+        if len(df_py) > 40000:
+            df_py = df_py.sample(40000, random_state=42)
+            full_df = pd.concat([df_py, df_others]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+    logger.info(f"Total Merged Data: {len(full_df)} samples")
+    return full_df
