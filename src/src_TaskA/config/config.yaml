@@ -4,41 +4,43 @@
 data:
   train_path: "data/Task_A/train.parquet"
   val_path: "data/Task_A/validation.parquet"
-  max_length: 512  
-  balance_languages: True 
-  samples_per_lang: 30000
-  stylo_feature_dim: 15 # (modificare in base al codice di stylometry.py)
+  max_length: 512
+  max_python_samples: 35000
+  stylo_feature_dim: 16
 
 # ---------------------
 # Model Architecture
 # ---------------------
 model:
-  model_name: "microsoft/unixcoder-base" 
+  model_name: "microsoft/graphcodebert-base" 
   num_labels: 2 
   use_lora: True
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
   extra_dropout: 0.1
 
 # ---------------------
 # Training Hyperparameters
 # ---------------------
 training:
+  seed: 42
   output_dir: "./results/results_TaskA"
   checkpoint_dir: "./results/results_TaskA/checkpoints"
-  log_dir: "./results/results_TaskA/logs"  
-  num_epochs: 4
-  early_stop_patience: 2
-  batch_size: 128
-  gradient_accumulation_steps: 2
-  learning_rate: 2e-4  
-  evaluation_metric: "f1"
-  best_metric_lower_is_better: false
+  log_dir: "./results/results_TaskA/logs" 
+  num_epochs: 8           
+  early_stop_patience: 3
+  batch_size: 16           
+  grad_accum_steps: 4
+  learning_rate: 3e-4
+  weight_decay: 0.01
   warmup_ratio: 0.1
   fp16: true
-  label_smoothing: 0.05
+  label_smoothing: 0.1
+  evaluation_metric: "f1"
 
 # ---------------------
 # Demo/Debug Mode
 # ---------------------
 demo:
-  active: false 
-  fraction: 0.05
+  active: false

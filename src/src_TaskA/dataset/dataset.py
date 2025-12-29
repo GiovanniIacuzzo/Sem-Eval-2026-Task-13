@@ -27,37 +27,34 @@ class BalancedBatchSampler(Sampler):
         self.n_cls0 = len(self.cls0_indices)
         self.n_cls1 = len(self.cls1_indices)
         
-        # Logica: Copre la classe minoritaria
         if self.n_cls0 > 0 and self.n_cls1 > 0:
             min_size = min(self.n_cls0, self.n_cls1)
-            self.n_batches = int((min_size * 2) / self.batch_size)
+            self.n_batches = int((len(self.labels)) / self.batch_size)
         else:
             self.n_batches = int(len(self.labels) / self.batch_size)
+            
         self.n_samples_per_class = self.batch_size // 2
 
     def __iter__(self) -> Iterator[int]:
         np.random.shuffle(self.cls0_indices)
         np.random.shuffle(self.cls1_indices)
+        
         ptr0 = 0
         ptr1 = 0
+        
+        from itertools import cycle
+        iter0 = cycle(self.cls0_indices)
+        iter1 = cycle(self.cls1_indices)
+
         for _ in range(self.n_batches):
             batch_indices = []
-            if self.n_cls0 > 0:
-                end0 = ptr0 + self.n_samples_per_class
-                if end0 > self.n_cls0:
-                    np.random.shuffle(self.cls0_indices)
-                    ptr0 = 0
-                    end0 = self.n_samples_per_class
-                batch_indices.extend(self.cls0_indices[ptr0:end0])
-                ptr0 = end0
-            if self.n_cls1 > 0:
-                end1 = ptr1 + (self.batch_size - len(batch_indices))
-                if end1 > self.n_cls1:
-                    np.random.shuffle(self.cls1_indices)
-                    ptr1 = 0
-                    end1 = self.batch_size - len(batch_indices)
-                batch_indices.extend(self.cls1_indices[ptr1:end1])
-                ptr1 = end1
+            
+            for _ in range(self.n_samples_per_class):
+                batch_indices.append(next(iter0))
+                
+            for _ in range(self.batch_size - self.n_samples_per_class):
+                batch_indices.append(next(iter1))
+
             np.random.shuffle(batch_indices)
             for idx in batch_indices:
                 yield int(idx)
@@ -69,224 +66,140 @@ class BalancedBatchSampler(Sampler):
 # 2. Dataset Class
 # -----------------------------------------------------------------------------
 class CodeDataset(Dataset):
-    def __init__(self, dataframe: pd.DataFrame, tokenizer, language_map: Dict[str, int], max_length: int = 512, augment: bool = False):
+    def __init__(self, dataframe: pd.DataFrame, tokenizer, language_map: Dict[str, int], max_length: int = 512):
         self.data = dataframe.reset_index(drop=True)
         self.tokenizer = tokenizer
         self.language_map = language_map
         self.max_length = max_length
-        self.augment = augment
+        
+        # Inizializza estrattore stilometrico
         self.stylo_extractor = StylometryExtractor()
 
-
+        # Lista labels per il sampler
         self.labels_list = self.data['label'].astype(int).tolist()
-        self.has_paired_data = 'aug_code' in self.data.columns
 
     def __len__(self) -> int:
         return len(self.data)
 
     def _clean_code(self, code: str) -> str:
         if not isinstance(code, str): return ""
-        return code.replace("```", "").strip()
+        # Rimuove backticks markdown se presenti
+        return code.replace("```python", "").replace("```java", "").replace("```cpp", "").replace("```", "").strip()
 
     def _tokenize(self, text):
-        return self.tokenizer(text, truncation=True, padding="max_length", max_length=self.max_length, return_tensors="pt")
+        return self.tokenizer(
+            text, 
+            truncation=True, 
+            padding="max_length", 
+            max_length=self.max_length, 
+            return_tensors="pt"
+        )
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        code = self._clean_code(str(self.data.at[idx, "code"]))
-        if len(code) < 5: code = "print('error')"
+        # 1. Recupero Dati Grezzi
+        raw_code = str(self.data.at[idx, "code"])
+        code = self._clean_code(raw_code)
+        
+        # Fallback per codici vuoti/corrotti
+        if len(code) < 5: 
+            code = "print('error_empty_code')"
+            
         label = int(self.data.at[idx, "label"])
         
-        lang_str = str(self.data.at[idx, "language"]).lower().strip()
-        lang_id = self.language_map.get(lang_str, self.language_map.get('unknown', 0))
-
+        # 2. Tokenizzazione (Semantica)
         enc = self._tokenize(code)
         
-        if self.stylo_extractor:
+        # 3. Estrazione Features (Stilometria)
+        try:
             stylo = self.stylo_extractor.extract(code)
-        else:
+        except Exception as e:
+            logger.warning(f"Stylo error at idx {idx}: {e}")
             stylo = np.zeros(15, dtype=np.float32)
 
-        item = {
+        return {
             "input_ids": enc["input_ids"].squeeze(0),
             "attention_mask": enc["attention_mask"].squeeze(0),
             "stylo_feats": torch.tensor(stylo, dtype=torch.float32),
             "labels": torch.tensor(label, dtype=torch.long),
         }
 
-        return item
-
 # -----------------------------------------------------------------------------
-# 3. Data Loading Logic
+# 3. Data Loading & Cleaning Logic
 # -----------------------------------------------------------------------------
 def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataFrame:
-    if not os.path.exists(file_path): return pd.DataFrame()
+    """Carica parquet e fa pulizia base."""
+    if not os.path.exists(file_path): 
+        logger.error(f"File not found: {file_path}")
+        return pd.DataFrame()
+        
     df = pd.read_parquet(file_path)
     
+    # Standardizza nomi colonne
     rename_map = {}
     if 'original_code' in df.columns: rename_map['original_code'] = 'code'
-    if 'augmented_code' in df.columns: rename_map['augmented_code'] = 'aug_code'
     if 'original_lang' in df.columns: rename_map['original_lang'] = 'language'
     if rename_map: df = df.rename(columns=rename_map)
 
+    # Pulizia Base
     df['language'] = df['language'].astype(str).str.lower().str.strip()
     df['label'] = pd.to_numeric(df['label'], errors='coerce').fillna(-1).astype(int)
+    
+    # Rimuovi righe non valide
+    initial_len = len(df)
     df = df.dropna(subset=['code', 'label'])
-    df = df[df['code'].str.strip().str.len() > 10] 
+    df = df[df['label'].isin([0, 1])]
+    df = df[df['code'].str.strip().str.len() > 10]
+    
+    # Tronca codici troppo lunghi
     df['code'] = df['code'].str.slice(0, max_code_chars)
+    
+    logger.info(f"Loaded {file_path}: {len(df)} samples (dropped {initial_len - len(df)})")
     return df.reset_index(drop=True)
 
-def smart_balance_dataset(df: pd.DataFrame, max_python_samples: int = 30000) -> pd.DataFrame:
+def downsample_dominant_language(df: pd.DataFrame, target_lang: str = 'python', max_samples: int = 35000) -> pd.DataFrame:
+    """
+    Se Python è > 80% del dataset, lo riduciamo a 'max_samples' per evitare overfitting
+    sulla sintassi Python, mantenendo intatti gli altri linguaggi rari.
+    """
     if df.empty: return df
     
-    df_python = df[df['language'] == 'python']
-    df_others = df[df['language'] != 'python']
+    df_dominant = df[df['language'] == target_lang]
+    df_others = df[df['language'] != target_lang]
     
-    logger.info(f"Balancing Logic: Python Total={len(df_python)} | Others (Keep All)={len(df_others)}")
+    if len(df_dominant) > max_samples:
+        logger.info(f"Downsampling {target_lang} from {len(df_dominant)} to {max_samples}...")
+        df_dominant = df_dominant.sample(n=max_samples, random_state=42)
     
-    if len(df_python) > max_python_samples:
-        # STRATEGIA DI PRIORITÀ:
-        if 'aug_code' in df_python.columns:
-            # Righe con augmentation
-            df_py_priority = df_python[df_python['aug_code'].notna() & (df_python['aug_code'] != "")]
-            # Righe senza augmentation
-            df_py_rest = df_python[~df_python.index.isin(df_py_priority.index)]
-            
-            logger.info(f"   -> Found {len(df_py_priority)} Python samples with augmentation.")
-            
-            if len(df_py_priority) >= max_python_samples:
-                # Caso A: Abbiamo troppi dati augmentati, ne prendiamo un sottoinsieme
-                df_python = df_py_priority.sample(n=max_python_samples, random_state=42)
-            else:
-                # Caso B: Prendiamo tutti i prioritari e riempiamo il resto con casuali
-                needed = max_python_samples - len(df_py_priority)
-                if len(df_py_rest) > needed:
-                    df_py_rest_sampled = df_py_rest.sample(n=needed, random_state=42)
-                    df_python = pd.concat([df_py_priority, df_py_rest_sampled])
-                else:
-                    df_python = pd.concat([df_py_priority, df_py_rest])
-        else:
-            df_python = df_python.sample(n=max_python_samples, random_state=42)
-        
-    return pd.concat([df_python, df_others]).sample(frac=1, random_state=42).reset_index(drop=True)
-
-def load_data(config: dict, tokenizer):
-    logger.info(">>> LOADING DATASETS WITH 'DATA FLIPPING' <<<")
+    # Uniamo e mescoliamo
+    balanced_df = pd.concat([df_dominant, df_others]).sample(frac=1, random_state=42).reset_index(drop=True)
     
-    # 1. Carica Train Base
-    train_df = load_and_preprocess(config["data"]["train_path"])
-    
-    # 2. Carica Augmented Data
-    aug_path = os.path.join(os.path.dirname(config["data"]["train_path"]), "train_augmented.parquet")
-    
-    if os.path.exists(aug_path):
-        logger.info(f"Processing Augmented Data from {aug_path}")
-        aug_raw = pd.read_parquet(aug_path)
-        
-        # Rename di sicurezza
-        if 'original_code' in aug_raw.columns: 
-            aug_raw = aug_raw.rename(columns={'original_code': 'code', 'augmented_code': 'aug_code', 'original_lang': 'language'})
+    logger.info(f"New Balance: {target_lang}={len(df_dominant)} | Others={len(df_others)}")
+    return balanced_df
 
-
-        df_consistency = aug_raw[['code', 'label', 'language', 'aug_code']].copy()
-        df_new_langs = aug_raw.copy()
-        
-        df_new_langs['code'] = aug_raw['aug_code']
-        df_new_langs['language'] = aug_raw['aug_lang']
-        df_new_langs['label'] = 1         
-        df_new_langs['aug_code'] = aug_raw['code']
-        
-        logger.info(f"Injecting {len(df_new_langs)} samples of NEW languages (Go, C#, PHP...) into training!")
-        
-        # 3. Unione Totale: Train Originale + Consistency + Nuovi Linguaggi
-        train_df = pd.concat([train_df, df_consistency, df_new_langs], ignore_index=True)
-        
-        train_df = train_df.drop_duplicates(subset=['code', 'language']).reset_index(drop=True)
-
-    else:
-        train_df['aug_code'] = None
-
-    # 4. Bilanciamento
-    if config["data"].get("balance_languages", True):
-        py_cap = config["data"].get("samples_per_lang", 30000)
-        train_df = smart_balance_dataset(train_df, max_python_samples=py_cap)
-
-    logger.info(f"FINAL TRAIN SIZE: {len(train_df)}")
-    logger.info(f"FINAL LANGUAGE DISTRIBUTION:\n{train_df['language'].value_counts()}")
-
-    # 5. Validation
-    val_df = load_and_preprocess(config["data"]["val_path"])
-    VAL_SUBSET = 4000
-    if len(val_df) > VAL_SUBSET:
-        try:
-            val_df = val_df.groupby('label', group_keys=False).apply(
-                lambda x: x.sample(min(len(x), VAL_SUBSET // 2), random_state=42)
-            ).reset_index(drop=True)
-        except:
-            val_df = val_df.sample(VAL_SUBSET, random_state=42).reset_index(drop=True)
-
-    # 6. Mappa Lingue
-    all_langs = pd.concat([train_df['language'], val_df['language']]).unique()
-    lang_map = {l: i for i, l in enumerate(sorted([str(l) for l in all_langs]))}
-    if 'unknown' not in lang_map: lang_map['unknown'] = len(lang_map)
-    
-    logger.info(f"Detected Languages Map: {lang_map}")
-    
-    train_ds = CodeDataset(train_df, tokenizer, lang_map, config["data"]["max_length"], augment=True)
-    val_ds = CodeDataset(val_df, tokenizer, lang_map, config["data"]["max_length"], augment=False)
-    
-    train_sampler = BalancedBatchSampler(train_ds.labels_list, batch_size=config["training"]["batch_size"])
-    
-    return train_ds, val_ds, train_sampler, train_df
-
-# -----------------------------------------------------------------------------
-# Data Loader Helper per K-Fold
-# -----------------------------------------------------------------------------
 def load_full_data_for_kfold(config):
     """
-    Carica Train + Validation + Augmented Data in un unico DataFrame.
+    Funzione principale per caricare TUTTI i dati (Train + Val originali).
+    Non carica più augmentation esterne.
     """
-    logger.info(">>> Merging Data for K-Fold Strategy <<<")
+    logger.info(">>> LOADING FULL DATASET (Clean Strategy) <<<")
     
-    # 1. Load Train Base
+    # 1. Load Train & Val originali
     train_path = config["data"]["train_path"]
-    df_train = load_and_preprocess(train_path)
-    
-    # 2. Load Augmentation (Opzionale, come nel tuo codice originale)
-    aug_path = config["data"].get("aug_path", train_path.replace("train.parquet", "train_augmented.parquet"))
-    if os.path.exists(aug_path):
-        logger.info(f"Injecting Augmented Data from {aug_path}")
-        aug_raw = pd.read_parquet(aug_path)
-        
-        # Normalizzazione nomi colonne augmentation
-        rename_map = {}
-        if 'original_code' in aug_raw.columns: rename_map['original_code'] = 'code'
-        if 'augmented_code' in aug_raw.columns: rename_map['augmented_code'] = 'aug_code'
-        if rename_map: aug_raw = aug_raw.rename(columns=rename_map)
-        
-        df_new_langs = aug_raw.copy()
-        if 'aug_code' in df_new_langs.columns:
-            df_new_langs['code'] = df_new_langs['aug_code']
-            df_new_langs['label'] = 1
-        
-        df_train = pd.concat([df_train, df_new_langs], ignore_index=True)
-        df_train = df_train.drop_duplicates(subset=['code']).reset_index(drop=True)
-
-    # 3. Load Validation Originale e unisci
     val_path = config["data"]["val_path"]
+    
+    df_train = load_and_preprocess(train_path)
     df_val = load_and_preprocess(val_path)
     
+    # 2. Merge in un unico dataset
     full_df = pd.concat([df_train, df_val]).reset_index(drop=True)
+    logger.info(f"Merged Total Size: {len(full_df)}")
     
-    # Pulizia base
-    full_df = full_df.dropna(subset=['code', 'label'])
-    full_df['label'] = full_df['label'].astype(int)
+    # 3. Gestione Dominanza Linguaggio
+    python_cap = config["data"].get("max_python_samples", 40000)
+    full_df = downsample_dominant_language(full_df, target_lang='python', max_samples=python_cap)
     
-    if config["data"].get("cap_python", True):
-        df_py = full_df[full_df['language'] == 'python']
-        df_others = full_df[full_df['language'] != 'python']
-        if len(df_py) > 40000:
-            df_py = df_py.sample(40000, random_state=42)
-            full_df = pd.concat([df_py, df_others]).sample(frac=1, random_state=42).reset_index(drop=True)
-
-    logger.info(f"Total Merged Data: {len(full_df)} samples")
+    # 4. Report Finale Distribuzione
+    logger.info("Final Language Distribution:")
+    logger.info(full_df['language'].value_counts())
+    
     return full_df
