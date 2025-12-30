@@ -13,13 +13,13 @@ dependencies:
   - matplotlib
   - seaborn
   - tqdm
-  - pyyaml  
-  - pytorch
+  - pyyaml
+  - pytorch>=2.6.0
   - torchvision
   - torchaudio
-  - pytorch-cuda=12.1
+  - pytorch-cuda=12.4
   - pip:
-      - transformers>=4.40.0
+      - transformers>=4.48.0
       - accelerate>=0.29.0
       - tokenizers
       - sentencepiece
@@ -31,5 +31,4 @@ dependencies:
       - pytorch-metric-learning
       - bitsandbytes
       - protobuf
-      - scikit-learn
       - kaggle
