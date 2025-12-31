@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 import yaml
 import torch
 import numpy as np
