@@ -1,188 +1,137 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel, AutoConfig
+from transformers import AutoModel
+from peft import get_peft_model, LoraConfig, TaskType
 
-try:
-    from peft import get_peft_model, LoraConfig, TaskType
-    PEFT_AVAILABLE = True
-except ImportError:
-    PEFT_AVAILABLE = False
+# --- SupCon Loss Custom Implementation ---
+class SupConLoss(nn.Module):
+    def __init__(self, temperature=0.07):
+        super(SupConLoss, self).__init__()
+        self.temperature = temperature
 
-# -----------------------------------------------------------------------------
-# 1. Pooling Strategy
-# -----------------------------------------------------------------------------
-class HybridPooling(nn.Module):
-    def __init__(self, hidden_size):
+    def forward(self, features, labels):
+        device = features.device
+        batch_size = features.shape[0]
+        labels = labels.contiguous().view(-1, 1)
+        
+        mask = torch.eq(labels, labels.T).float().to(device)
+        anchor_dot_contrast = torch.div(torch.matmul(features, features.T), self.temperature)
+        
+        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
+        logits = anchor_dot_contrast - logits_max.detach()
+        
+        logits_mask = torch.scatter(torch.ones_like(mask), 1, torch.arange(batch_size).view(-1, 1).to(device), 0)
+        mask = mask * logits_mask
+        
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-6)
+        
+        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-6)
+        return -mean_log_prob_pos.mean()
+
+# --- Helpers ---
+class GradientReversalFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.alpha, None
+
+class AttentionHead(nn.Module):
+    def __init__(self, hidden_size, dropout_prob=0.1):
         super().__init__()
         self.attn = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.Tanh(),
             nn.Linear(hidden_size, 1)
         )
+        self.dropout = nn.Dropout(dropout_prob)
 
     def forward(self, hidden_states, attention_mask):
-        # Attention Pooling
         attn_scores = self.attn(hidden_states).squeeze(-1)
-        min_val = -1e4
-        # Maschera i token di padding
+        min_val = -1e4 if attn_scores.dtype == torch.float16 else -1e9
         attn_scores = attn_scores.masked_fill(attention_mask == 0, min_val)
-        attn_weights = F.softmax(attn_scores, dim=-1)
-        att_feature = torch.sum(attn_weights.unsqueeze(-1) * hidden_states, dim=1)
+        attn_weights = self.dropout(F.softmax(attn_scores, dim=-1))
+        return torch.sum(attn_weights.unsqueeze(-1) * hidden_states, dim=1)
 
-        # Mean Pooling
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
-        sum_embeddings = torch.sum(hidden_states * input_mask_expanded, 1)
-        sum_mask = input_mask_expanded.sum(1)
-        sum_mask = torch.clamp(sum_mask, min=1e-9)
-        mean_feature = sum_embeddings / sum_mask
-
-        # Concatenazione
-        return torch.cat([att_feature, mean_feature], dim=1)
-
-# -----------------------------------------------------------------------------
-# 2. Stylometric Network
-# -----------------------------------------------------------------------------
-class StyloNet(nn.Module):
-    """
-    Rete densa per processare le feature stilometriche numeriche.
-    """
-    def __init__(self, input_dim, output_dim=128, dropout_rate=0.2):
+# --- Main Model ---
+class CodeClassifier(nn.Module):
+    def __init__(self, config, dann_lang_weights=None):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, output_dim * 2),
-            nn.LayerNorm(output_dim * 2),
-            nn.Mish(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(output_dim * 2, output_dim),
-            nn.LayerNorm(output_dim),
-            nn.Mish(),
-            nn.Dropout(dropout_rate)
-        )
+        model_cfg = config["model"]
+        self.num_labels = 2
+        self.num_languages = model_cfg.get("num_languages", 1)
         
-    def forward(self, x):
-        return self.net(x)
-
-# -----------------------------------------------------------------------------
-# 3. Fusion Model Architecture
-# -----------------------------------------------------------------------------
-class FusionCodeClassifier(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        model_cfg = config.get("model", {})
-        data_cfg = config.get("data", {})
-        train_cfg = config.get("training", {})
+        self.dann_weight = model_cfg.get("dann_weight", 0.1)
+        self.contrastive_weight = model_cfg.get("contrastive_weight", 0.5)
+        self.use_supcon = model_cfg.get("use_supcon", True)
         
-        self.model_name = model_cfg.get("model_name", "microsoft/graphcodebert-base")
-        self.num_labels = model_cfg.get("num_labels", 2)
-        
-        # Stylo Config
-        self.stylo_input_dim = data_cfg.get("stylo_feature_dim", 16)
-        
-        print(f"Loading backbone: {self.model_name}")
-        hf_config = AutoConfig.from_pretrained(self.model_name)
-        hf_config.output_hidden_states = True
-        
-        self.base_model = AutoModel.from_pretrained(self.model_name, config=hf_config)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        
+        print(f"Loading Backbone: {model_cfg['model_name']}")
+        self.base_model = AutoModel.from_pretrained(model_cfg['model_name'])
         self.hidden_size = self.base_model.config.hidden_size
-        
-        # Gradient Checkpointing
-        if hasattr(self.base_model, "gradient_checkpointing_enable"):
-            self.base_model.gradient_checkpointing_enable()
-        
-        self.use_lora = model_cfg.get("use_lora", True) and PEFT_AVAILABLE
-        
-        if self.use_lora:
-            r_dim = model_cfg.get("lora_r", 16)
-            alpha = model_cfg.get("lora_alpha", 32)
-            dropout = model_cfg.get("lora_dropout", 0.05)
-            
-            print(f"Activating LoRA: r={r_dim}, alpha={alpha}, dropout={dropout}")
-            
-            target_modules = ["query", "key", "value", "dense"] 
-            
+
+        if model_cfg.get("use_lora", False):
+            lora_cfg = model_cfg["lora"]
             peft_config = LoraConfig(
-                task_type=TaskType.FEATURE_EXTRACTION, 
-                inference_mode=False, 
-                r=r_dim,
-                lora_alpha=alpha,
-                lora_dropout=dropout,
-                target_modules=target_modules,
-                bias="none"
+                task_type=TaskType.FEATURE_EXTRACTION, inference_mode=False, 
+                r=lora_cfg["r"], lora_alpha=lora_cfg["alpha"], lora_dropout=lora_cfg["dropout"],
+                target_modules=lora_cfg.get("target_modules", ["query", "key", "value", "dense"])
             )
             self.base_model = get_peft_model(self.base_model, peft_config)
-            self.base_model.print_trainable_parameters()
-        else:
-            print("WARNING: Full Fine-Tuning active. High VRAM usage expected.")
 
-        # --- Components ---
-        self.pooler = HybridPooling(self.hidden_size)
+        self.pooler = AttentionHead(self.hidden_size)
         
-        self.stylo_hidden_dim = 128
-        self.stylo_net = StyloNet(self.stylo_input_dim, self.stylo_hidden_dim)
-        
-        self.fusion_dim = (self.hidden_size * 2) + self.stylo_hidden_dim
-        
-        # Multi-Sample Dropout
-        clf_dropout = model_cfg.get("extra_dropout", 0.1)
-        self.dropouts = nn.ModuleList([nn.Dropout(clf_dropout) for _ in range(5)])
-        
-        # Classificatore Finale
         self.classifier = nn.Sequential(
-            nn.Linear(self.fusion_dim, self.hidden_size),
-            nn.LayerNorm(self.hidden_size),
+            nn.Linear(self.hidden_size, self.hidden_size),
             nn.Mish(),
-            nn.Dropout(clf_dropout),
+            nn.Dropout(0.2),
             nn.Linear(self.hidden_size, self.num_labels)
         )
         
-        self._init_weights(self.classifier)
+        self.language_classifier = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size // 2, self.num_languages)
+        )
         
-        ls_val = train_cfg.get("label_smoothing", 0.0)
-        print(f"Loss Function initialized with Label Smoothing: {ls_val}")
-        self.loss_fn = nn.CrossEntropyLoss(label_smoothing=ls_val)
-        
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
-            if module.bias is not None:
-                nn.init.constant_(module.bias, 0)
+        self.projection_head = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, 128)
+        )
 
-    def forward(self, input_ids, attention_mask, stylo_feats=None, labels=None):
-        # 1. Backbone Forward
+        # Losses
+        self.ce_loss = nn.CrossEntropyLoss() 
+        self.dann_loss_fn = nn.CrossEntropyLoss(weight=dann_lang_weights)
+        self.supcon_loss = SupConLoss(temperature=model_cfg.get("contrastive_temp", 0.1))
+
+    def forward(self, input_ids, attention_mask, lang_ids=None, labels=None, alpha=0.0):
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
-        last_hidden = outputs.last_hidden_state
+        features = self.pooler(outputs.last_hidden_state, attention_mask)
         
-        # 2. Pooling Semantico
-        semantic_emb = self.pooler(last_hidden, attention_mask)
-        
-        # 3. Processamento Stilometria
-        if stylo_feats is not None:
-            if stylo_feats.device != semantic_emb.device:
-                stylo_feats = stylo_feats.to(semantic_emb.device)
-            stylo_emb = self.stylo_net(stylo_feats)
-        else:
-            device = semantic_emb.device
-            dummy_feats = torch.zeros((semantic_emb.size(0), self.stylo_input_dim), device=device)
-            stylo_emb = self.stylo_net(dummy_feats)
-
-        # 4. Fusione
-        fused_emb = torch.cat([semantic_emb, stylo_emb], dim=1)
-
-        # 5. Classificazione con Multi-Sample
-        task_logits = None
-        for i, dropout in enumerate(self.dropouts):
-            if i == 0:
-                task_logits = self.classifier(dropout(fused_emb))
-            else:
-                task_logits += self.classifier(dropout(fused_emb))
-        
-        task_logits = task_logits / len(self.dropouts)
+        logits = self.classifier(features)
         
         loss = None
         if labels is not None:
-            loss = self.loss_fn(task_logits, labels)
+            # 1. Main Task Loss
+            loss_task = self.ce_loss(logits, labels)
             
-        return task_logits, loss
+            # 2. SupCon Loss
+            loss_con = 0.0
+            if self.use_supcon:
+                proj_features = F.normalize(self.projection_head(features), p=2, dim=1)
+                loss_con = self.supcon_loss(proj_features, labels)
+            
+            # 3. DANN Loss
+            loss_dann = 0.0
+            if lang_ids is not None and alpha > 0:
+                reversed_feats = GradientReversalFn.apply(features, alpha)
+                lang_logits = self.language_classifier(reversed_feats)
+                loss_dann = self.dann_loss_fn(lang_logits, lang_ids)
+            
+            loss = loss_task + (self.contrastive_weight * loss_con) + (self.dann_weight * loss_dann)
+            
+        return loss, logits

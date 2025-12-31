@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 import gc
-from typing import Dict, List, Tuple
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from typing import Dict, List
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, f1_score, classification_report
 from torch.amp import autocast
 from tqdm import tqdm
 
@@ -34,57 +34,52 @@ def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
 # -----------------------------------------------------------------------------
 # Evaluation Loop
 # -----------------------------------------------------------------------------
-def evaluate(
-    model: torch.nn.Module, 
-    dataloader: torch.utils.data.DataLoader, 
-    device: torch.device
-) -> Tuple[Dict[str, float], List[int], List[int]]:
-    """
-    Esegue il loop di valutazione passando anche le feature stilometriche.
-    """
+def evaluate(model, dataloader, device):
     model.eval()
-    running_loss = 0.0
-    predictions = []
-    references = []
-
-    progress_bar = tqdm(dataloader, desc="Evaluating", leave=False, dynamic_ncols=True)
-
-    with torch.no_grad():
-        for batch in progress_bar:
-            input_ids      = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels         = batch["labels"].to(device, non_blocking=True)
-            
-            stylo_feats    = batch.get("stylo_feats")
-            if stylo_feats is not None:
-                stylo_feats = stylo_feats.to(device, non_blocking=True)
-
-            with autocast(device_type='cuda', dtype=torch.float16):
-                logits, loss = model(
-                    input_ids, 
-                    attention_mask, 
-                    stylo_feats=stylo_feats,
-                    labels=labels
-                )
-            
-            if loss is not None:
-                running_loss += loss.item()
-
-            preds = torch.argmax(logits, dim=1)
-            
-            predictions.extend(preds.detach().cpu().numpy())
-            references.extend(labels.detach().cpu().numpy())
-            
-            # Pulizia per evitare picchi di VRAM
-            del input_ids, attention_mask, labels, logits, loss, stylo_feats
-
-    eval_metrics = compute_metrics(predictions, references)
-    eval_metrics["loss"] = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
-
-    # Pulizia memoria GPU aggressiva post-valutazione
-    if device.type == 'cuda':
-        torch.cuda.empty_cache()
+    val_loss = 0.0
+    all_preds = []
+    all_labels = []
     
-    gc.collect()
-
-    return eval_metrics, predictions, references
+    criterion = torch.nn.CrossEntropyLoss()
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Validating", leave=False, dynamic_ncols=True):
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
+            
+            with autocast(device_type='cuda', dtype=torch.float16):
+                # Il modello HF ritorna (loss, logits) se labels sono passate,
+                # ma per sicurezza ricalcoliamo o usiamo l'output standard
+                outputs = model(input_ids, attention_mask)
+                # SimpleCodeClassifier ritorna (loss, logits) se labels sono passate al forward,
+                # oppure solo logits se no. Adattiamo in base all'implementazione model.py
+                
+                # Assumendo model.py ritorni (loss, logits)
+                logits = outputs[1] 
+                loss = criterion(logits, labels)
+            
+            val_loss += loss.item()
+            preds = torch.argmax(logits, dim=1).cpu().numpy()
+            
+            all_preds.extend(preds)
+            all_labels.extend(labels.cpu().numpy())
+            
+    avg_loss = val_loss / len(dataloader)
+    
+    # Metriche
+    acc = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average='binary') # Task A è binario
+    
+    # Report dettagliato per log
+    report = classification_report(all_labels, all_preds, target_names=["Human", "Machine"], output_dict=True)
+    
+    metrics = {
+        "loss": avg_loss,
+        "acc": acc,
+        "f1": f1,
+        "human_f1": report["Human"]["f1-score"],
+        "machine_f1": report["Machine"]["f1-score"]
+    }
+    
+    return metrics

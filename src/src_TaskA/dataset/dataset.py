@@ -1,164 +1,101 @@
-import os
-import logging
-import pandas as pd
 import torch
+import pandas as pd
 import numpy as np
-from typing import Dict, List, Iterator
-from torch.utils.data import Dataset, Sampler
-from src.src_TaskA.features.stylometry import StylometryExtractor
+import logging
+import random
+from torch.utils.data import Dataset
+from sklearn.utils.class_weight import compute_class_weight
 
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------------------------------------
-# 1. Custom Sampler
-# -----------------------------------------------------------------------------
-class BalancedBatchSampler(Sampler):
-    def __init__(self, labels: List[int], batch_size: int):
-        self.labels = np.array(labels)
-        self.batch_size = batch_size
-        self.cls0_indices = np.where(self.labels == 0)[0]
-        self.cls1_indices = np.where(self.labels == 1)[0]
-        self.n_cls0 = len(self.cls0_indices)
-        self.n_cls1 = len(self.cls1_indices)
-        
-        if self.n_cls0 > 0 and self.n_cls1 > 0:
-            self.n_batches = int(len(self.labels) / self.batch_size)
-        else:
-            self.n_batches = int(len(self.labels) / self.batch_size)
-            
-        self.n_samples_per_class = self.batch_size // 2
-
-    def __iter__(self) -> Iterator[List[int]]:
-        np.random.shuffle(self.cls0_indices)
-        np.random.shuffle(self.cls1_indices)
-        
-        # Iteratori ciclici infiniti
-        from itertools import cycle
-        iter0 = cycle(self.cls0_indices)
-        iter1 = cycle(self.cls1_indices)
-
-        for _ in range(self.n_batches):
-            batch_indices = []
-            
-            # Preleva metà batch dalla classe 0
-            for _ in range(self.n_samples_per_class):
-                batch_indices.append(int(next(iter0)))
-                
-            # Preleva metà batch dalla classe 1
-            for _ in range(self.batch_size - self.n_samples_per_class):
-                batch_indices.append(int(next(iter1)))
-
-            np.random.shuffle(batch_indices)
-
-            yield batch_indices 
-
-    def __len__(self) -> int:
-        return self.n_batches
-
-# -----------------------------------------------------------------------------
-# 2. Dataset Class
-# -----------------------------------------------------------------------------
 class CodeDataset(Dataset):
-    def __init__(self, dataframe: pd.DataFrame, tokenizer, language_map: Dict[str, int], max_length: int = 512):
+    def __init__(self, dataframe, tokenizer, language_map, max_length=512, is_test=False, augment=False):
         self.data = dataframe.reset_index(drop=True)
         self.tokenizer = tokenizer
         self.language_map = language_map
         self.max_length = max_length
-        self.stylo_extractor = StylometryExtractor()
-        self.labels_list = self.data['label'].astype(int).tolist()
+        self.is_test = is_test
+        self.augment = augment
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.data)
 
-    def _clean_code(self, code: str) -> str:
-        if not isinstance(code, str): return ""
-        return code.replace("```python", "").replace("```java", "").replace("```cpp", "").replace("```", "").strip()
+    def _structural_noise(self, code):
+        if not self.augment: return code
+        lines = code.split('\n')
+        new_lines = []
+        for line in lines:
+            if random.random() < 0.1: new_lines.append("") 
+            if random.random() < 0.1: line = line + " " * random.randint(1, 4)
+            if random.random() < 0.01: line = " " + line 
+            new_lines.append(line)
+        return "\n".join(new_lines)
 
-    def _tokenize(self, text):
-        return self.tokenizer(
-            text, 
-            truncation=True, 
-            padding="max_length", 
-            max_length=self.max_length, 
-            return_tensors="pt"
-        )
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        raw_code = str(row['code']) if row['code'] is not None else ""
+        code = self._structural_noise(raw_code)
+        
+        lang_str = str(row['language']).lower() if 'language' in row else 'unknown'
+        lang_id = self.language_map.get(lang_str, 0) 
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        raw_code = str(self.data.at[idx, "code"])
-        code = self._clean_code(raw_code)
-        
-        if len(code) < 5: 
-            code = "print('error_empty_code')"
-            
-        label = int(self.data.at[idx, "label"])
-        
-        enc = self._tokenize(code)
-        
-        try:
-            stylo = self.stylo_extractor.extract(code)
-        except Exception as e:
-            logger.warning(f"Stylo error at idx {idx}: {e}")
-            stylo = np.zeros(16, dtype=np.float32)
+        encoding = self.tokenizer(code, truncation=True, padding="max_length", max_length=self.max_length, return_tensors="pt")
 
-        return {
-            "input_ids": enc["input_ids"].squeeze(0),
-            "attention_mask": enc["attention_mask"].squeeze(0),
-            "stylo_feats": torch.tensor(stylo, dtype=torch.float32),
-            "labels": torch.tensor(label, dtype=torch.long),
+        item = {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "lang_ids": torch.tensor(lang_id, dtype=torch.long)
         }
+        if not self.is_test:
+            label = int(row['label'])
+            item["labels"] = torch.tensor(label, dtype=torch.long)
+        return item
 
-# -----------------------------------------------------------------------------
-# 3. Data Loading Logic
-# -----------------------------------------------------------------------------
-def load_and_preprocess(file_path: str, max_code_chars: int = 20000) -> pd.DataFrame:
-    if not os.path.exists(file_path): 
-        return pd.DataFrame()
+def get_dann_class_weights(df, language_map, device):
+    """Calcola i pesi inversi per la loss DANN."""
+    valid_langs = [l for l in df['language'] if l in language_map]
+    if not valid_langs: return None
+    
+    y_langs = [language_map[l] for l in valid_langs]
+    classes = np.unique(y_langs)
+    weights = compute_class_weight(class_weight='balanced', classes=classes, y=y_langs)
+    
+    weight_tensor = torch.ones(len(language_map)).to(device)
+    for cls_idx, w in zip(classes, weights):
+        weight_tensor[cls_idx] = w
+    return weight_tensor
+
+def balance_dataframe(df, config):
+    """Funzione helper per bilanciare un dataframe specifico (es. train fold)."""
+    lang_counts = df['language'].value_counts()
+    if len(lang_counts) > 1:
+        target_per_lang = int(lang_counts.iloc[1] * 1.5) 
+    else:
+        target_per_lang = 10000 
         
-    df = pd.read_parquet(file_path)
+    global_cap = config["data"].get("max_samples_per_language", 15000)
+    target_samples = min(target_per_lang, global_cap)
     
-    rename_map = {}
-    if 'original_code' in df.columns: rename_map['original_code'] = 'code'
-    if 'original_lang' in df.columns: rename_map['original_lang'] = 'language'
-    if rename_map: df = df.rename(columns=rename_map)
+    balanced_dfs = []
+    for (lang, label), group in df.groupby(['language', 'label']):
+        if len(group) > (target_samples // 2): 
+            balanced_dfs.append(group.sample(n=(target_samples // 2), random_state=42))
+        else:
+            balanced_dfs.append(group)
+            if len(group) < 1000: # Oversampling per classi minuscole
+                balanced_dfs.append(group.sample(n=1000, replace=True, random_state=42))
 
-    df['language'] = df['language'].astype(str).str.lower().str.strip()
-    df['label'] = pd.to_numeric(df['label'], errors='coerce').fillna(-1).astype(int)
-    
-    df = df.dropna(subset=['code', 'label'])
-    df = df[df['label'].isin([0, 1])]
-    df = df[df['code'].str.strip().str.len() > 10]
-    df['code'] = df['code'].str.slice(0, max_code_chars)
-    
-    logger.info(f"Loaded {file_path}: {len(df)} samples")
-    return df.reset_index(drop=True)
+    return pd.concat(balanced_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
 
-def downsample_dominant_language(df: pd.DataFrame, target_lang: str = 'python', max_samples: int = 35000) -> pd.DataFrame:
-    if df.empty: return df
+def load_data_raw(config):
+    """Carica i dati GREZZI senza bilanciare."""
+    logger.info("Loading Raw Datasets...")
+    df_train = pd.read_parquet(config["data"]["train_path"])
+    df_val = pd.read_parquet(config["data"]["val_path"])
     
-    df_dominant = df[df['language'] == target_lang]
-    df_others = df[df['language'] != target_lang]
-    
-    if len(df_dominant) > max_samples:
-        logger.info(f"Downsampling {target_lang} from {len(df_dominant)} to {max_samples}...")
-        df_dominant = df_dominant.sample(n=max_samples, random_state=42)
-    
-    balanced_df = pd.concat([df_dominant, df_others]).sample(frac=1, random_state=42).reset_index(drop=True)
-    logger.info(f"New Balance: {target_lang}={len(df_dominant)} | Others={len(df_others)}")
-    return balanced_df
-
-def load_full_data_for_kfold(config):
-    logger.info(">>> LOADING FULL DATASET (Clean Strategy) <<<")
-    
-    df_train = load_and_preprocess(config["data"]["train_path"])
-    df_val = load_and_preprocess(config["data"]["val_path"])
-    
-    full_df = pd.concat([df_train, df_val]).reset_index(drop=True)
-    logger.info(f"Merged Total Size: {len(full_df)}")
-    
-    python_cap = config["data"].get("max_python_samples", 40000)
-    full_df = downsample_dominant_language(full_df, target_lang='python', max_samples=python_cap)
-    
-    logger.info("Final Language Distribution:")
-    logger.info(full_df['language'].value_counts())
-    
-    return full_df
+    for df in [df_train, df_val]:
+        if 'original_code' in df.columns: df.rename(columns={'original_code': 'code'}, inplace=True)
+        if 'original_lang' in df.columns: df.rename(columns={'original_lang': 'language'}, inplace=True)
+        df['language'] = df['language'].str.lower()
+        
+    return df_train, df_val

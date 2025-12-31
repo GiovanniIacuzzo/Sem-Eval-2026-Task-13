@@ -1,46 +1,38 @@
-# ---------------------
-# Dataset Configuration
-# ---------------------
+experiment:
+  name: "TaskA_OOD_SupCon_KFold"
+  seed: 42
+
 data:
   train_path: "data/Task_A/train.parquet"
   val_path: "data/Task_A/validation.parquet"
   max_length: 512
-  max_python_samples: 35000
-  stylo_feature_dim: 16
+  max_samples_per_language: 10000 
+  balance_languages: true
+  num_workers: 4
 
-# ---------------------
-# Model Architecture
-# ---------------------
 model:
-  model_name: "microsoft/graphcodebert-base" 
-  num_labels: 2 
-  use_lora: True
-  lora_r: 16
-  lora_alpha: 32
-  lora_dropout: 0.05
-  extra_dropout: 0.1
+  model_name: "microsoft/graphcodebert-base"
+  num_labels: 2
+  use_supcon: true
+  contrastive_temp: 0.1
+  contrastive_weight: 0.5
+  use_dann: true
+  dann_weight: 0.1
+  use_lora: true
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.1
 
-# ---------------------
-# Training Hyperparameters
-# ---------------------
 training:
-  seed: 42
   output_dir: "./results/results_TaskA"
   checkpoint_dir: "./results/results_TaskA/checkpoints"
-  log_dir: "./results/results_TaskA/logs" 
-  num_epochs: 8           
-  early_stop_patience: 3
-  batch_size: 16           
-  grad_accum_steps: 4
-  learning_rate: 3e-4
-  weight_decay: 0.01
+  k_folds: 1
+  num_epochs: 1
+  batch_size: 16          
+  grad_accum_steps: 2
+  learning_rate: 1.0e-4
+  weight_decay: 0.05
+  max_grad_norm: 1.0
   warmup_ratio: 0.1
-  fp16: true
-  label_smoothing: 0.1
-  evaluation_metric: "f1"
-
-# ---------------------
-# Demo/Debug Mode
-# ---------------------
-demo:
-  active: false
+  patience: 2
