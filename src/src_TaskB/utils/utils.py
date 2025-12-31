@@ -1,10 +1,8 @@
 import torch
 import numpy as np
-import gc
 import logging
-from typing import Dict, List, Tuple, Any
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
-from torch.amp import autocast
+from typing import Dict, List, Any
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report, f1_score
 from tqdm import tqdm
 import random
 import os
@@ -83,62 +81,47 @@ def set_seed(seed: int = 42):
 # -----------------------------------------------------------------------------
 # Inference & Evaluation Loop
 # -----------------------------------------------------------------------------
-def evaluate(model, dataloader, device, label_names=None) -> Tuple[Dict[str, float], List[int], List[int]]:
-    """
-    Validation loop optimized for inference stability on CUDA.
-    Args:
-        label_names: Lista di stringhe con i nomi delle classi per il report dettagliato.
-    """
+def evaluate_model(model, dataloader, device, label_names=None):
     model.eval()
-    predictions, references = [], []
-    running_loss = 0.0
+    loss_accum = 0.0
+    all_preds = []
+    all_labels = []
     
-    if device.type == 'cuda':
-        device_type = 'cuda'
-        dtype = torch.float16
-    elif device.type == 'mps':
-        device_type = 'mps'
-        dtype = torch.float16
-    else:
-        device_type = 'cpu'
-        dtype = torch.bfloat16
-        
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validating", leave=False):
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels = batch["labels"].to(device, non_blocking=True)
+        for batch in tqdm(dataloader, desc="Evaluating", leave=False):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
             
-            lang_ids = batch.get("lang_ids", None)
-            if lang_ids is not None:
-                lang_ids = lang_ids.to(device, non_blocking=True)
-
-            with autocast(device_type=device_type, dtype=dtype):
-                logits, loss = model(
-                    input_ids, 
-                    attention_mask, 
-                    lang_ids=lang_ids, 
-                    labels=labels, 
-                    alpha=0.0 
-                )
-
-            if loss is not None:
-                running_loss += loss.item()
-
-            preds = torch.argmax(logits, dim=1).detach().cpu().numpy()
-            labels_cpu = labels.detach().cpu().numpy()
+            extra_features = batch.get("extra_features", None)
+            if extra_features is not None:
+                extra_features = extra_features.to(device)
             
-            predictions.extend(preds)
-            references.extend(labels_cpu)
+            logits, loss = model(
+                input_ids, 
+                attention_mask, 
+                extra_features=extra_features,
+                labels=labels, 
+                alpha=0.0
+            )
+            
+            loss_accum += loss.item()
+            preds = torch.argmax(logits, dim=1).cpu().numpy()
+            all_preds.extend(preds)
+            all_labels.extend(labels.cpu().numpy())
 
-    avg_loss = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
-
-    metrics, report_str = compute_metrics(predictions, references, label_names)
-    metrics["loss"] = avg_loss
-    if device.type == 'cuda':
-        torch.cuda.empty_cache()
-    elif device.type == 'mps':
-        torch.mps.empty_cache()
-    gc.collect()
+    metrics = {
+        "loss": loss_accum / len(dataloader),
+        "accuracy": accuracy_score(all_labels, all_preds),
+        "f1_macro": f1_score(all_labels, all_preds, average="macro"),
+        "f1_weighted": f1_score(all_labels, all_preds, average="weighted")
+    }
     
-    return metrics, predictions, references, report_str
+    report = ""
+    if label_names:
+        try:
+            report = classification_report(all_labels, all_preds, target_names=label_names, digits=4)
+        except Exception as e:
+            logger.warning(f"Classification Report Warning: {e}")
+            
+    return metrics, all_preds, all_labels, report

@@ -19,6 +19,28 @@ except ImportError:
     PEFT_AVAILABLE = False
 
 # -----------------------------------------------------------------------------
+# Focal Loss Layer
+# -----------------------------------------------------------------------------
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+        self.register_buffer('alpha', alpha if alpha is not None else None)
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+# -----------------------------------------------------------------------------
 # DANN Layer
 # -----------------------------------------------------------------------------
 class GradientReversalFn(torch.autograd.Function):
@@ -57,14 +79,14 @@ class AttentionHead(nn.Module):
         return context_vector
 
 # -----------------------------------------------------------------------------
-# CodeClassifier
+# CodeClassifier (Aggiornato)
 # -----------------------------------------------------------------------------
 class CodeClassifier(nn.Module):
     def __init__(self, config, class_weights=None):
         """
         Args:
-            config: Dict di configurazione nidificato (config['model']...).
-            class_weights: Tensor opzionale per bilanciare la Loss (es. per classi rare).
+            config: Dict di configurazione.
+            class_weights: Tensor opzionale per bilanciare la Loss.
         """
         super().__init__()
         model_cfg = config.get("model", {})
@@ -72,6 +94,11 @@ class CodeClassifier(nn.Module):
         
         self.model_name = model_cfg.get("model_name", "microsoft/codebert-base")
         self.num_labels = int(model_cfg.get("num_labels", 2))
+        
+        # Nuovi parametri da config
+        self.num_extra_features = int(model_cfg.get("num_extra_features", 0))
+        use_focal_loss = training_cfg.get("use_focal_loss", False)
+        focal_gamma = float(training_cfg.get("focal_gamma", 2.0))
         
         weights_cfg = training_cfg.get("loss_weights", {})
         self.w_supcon = float(weights_cfg.get("w_supcon", 0.1))
@@ -84,6 +111,7 @@ class CodeClassifier(nn.Module):
         base_model = AutoModel.from_pretrained(self.model_name, config=hf_config)
         self.hidden_size = hf_config.hidden_size
 
+        # --- LoRA Setup ---
         use_lora = model_cfg.get("use_lora", False)
         if use_lora and PEFT_AVAILABLE:
             peft_config = LoraConfig(
@@ -100,10 +128,11 @@ class CodeClassifier(nn.Module):
             self.base_model = base_model
             print("LoRA Disabled or not available.")
 
-        self.pooler = AttentionHead(self.hidden_size)
+        self.pooler = AttentionHead(self.hidden_size)        
+        input_dim = self.hidden_size + self.num_extra_features
         
         self.classifier = nn.Sequential(
-            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.Linear(input_dim, self.hidden_size),
             nn.Mish(),
             nn.Dropout(0.2), 
             nn.Linear(self.hidden_size, self.num_labels)
@@ -122,10 +151,16 @@ class CodeClassifier(nn.Module):
             nn.Linear(self.hidden_size // 2, num_languages)
         )
 
-        if class_weights is not None:
-            self.ce_loss = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+        # --- Loss Selection ---
+        if use_focal_loss:
+            print(f"Using Focal Loss (gamma={focal_gamma})")
+            self.main_loss = FocalLoss(alpha=class_weights, gamma=focal_gamma)
+        elif class_weights is not None:
+            print("Using Weighted CrossEntropyLoss")
+            self.main_loss = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
         else:
-            self.ce_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
+            print("Using Standard CrossEntropyLoss")
+            self.main_loss = nn.CrossEntropyLoss(label_smoothing=0.1)
             
         self.dann_loss = nn.CrossEntropyLoss()
         
@@ -134,16 +169,27 @@ class CodeClassifier(nn.Module):
         else:
             self.supcon_loss = None
 
-    def forward(self, input_ids, attention_mask, lang_ids=None, labels=None, alpha=1.0):
+    def forward(self, input_ids, attention_mask, lang_ids=None, labels=None, extra_features=None, alpha=1.0):
+        # 1. Base Model & Pooling
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
-        
         last_hidden_state = outputs.last_hidden_state
         features = self.pooler(last_hidden_state, attention_mask)
-        logits = self.classifier(features)
+        
+        # 2. Feature Combination
+        if extra_features is not None and self.num_extra_features > 0:
+            if extra_features.dim() == 1:
+                extra_features = extra_features.unsqueeze(1)
+            
+            classifier_input = torch.cat((features, extra_features), dim=1)
+        else:
+            classifier_input = features
+
+        # 3. Prediction
+        logits = self.classifier(classifier_input)
         
         loss = None
         if labels is not None:
-            loss_ce = self.ce_loss(logits, labels)
+            loss_main = self.main_loss(logits, labels)
             
             loss_scl = 0.0
             if self.supcon_loss is not None and self.w_supcon > 0:
@@ -160,14 +206,11 @@ class CodeClassifier(nn.Module):
                 if valid_mask.any():
                     loss_dann = self.dann_loss(lang_logits[valid_mask], lang_ids[valid_mask])
             
-            loss = loss_ce + (self.w_supcon * loss_scl) + (self.w_dann * loss_dann)
+            loss = loss_main + (self.w_supcon * loss_scl) + (self.w_dann * loss_dann)
             
         return logits, loss
 
     def compute_metrics(self, preds, labels):
-        """
-        Calcola metriche standard (Accuracy, F1 Macro, F1 Weighted).
-        """
         preds = np.array(preds)
         labels = np.array(labels)
         

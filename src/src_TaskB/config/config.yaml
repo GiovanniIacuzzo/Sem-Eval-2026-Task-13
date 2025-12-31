@@ -8,12 +8,13 @@ common:
   log_dir: "results/results_TaskB/logs"  
   seed: 42
   fp16: true
-  num_workers: 4  
+  num_workers: 4
+  num_extra_features: 5   
   learning_rate: 2.0e-5
   warmup_ratio: 0.1
   weight_decay: 0.01
   gradient_accumulation_steps: 1
-  max_grad_norm: 1.0
+  max_grad_norm: 1.0  
   languages: ["python", "java", "cpp", "c", "cs", "javascript", "php", "ruby", "rust", "go", "typescript", "kotlin", "swift", "shell"]
 
 # -----------------------------------------------------------------------------
@@ -21,23 +22,26 @@ common:
 # Task: Human (0) vs AI (1)
 # -----------------------------------------------------------------------------
 binary:
-  model_name: "microsoft/codebert-base"
+  model_name: "microsoft/unixcoder-base"
   num_labels: 2
   use_lora: false
   max_length: 512
   batch_size: 16
   gradient_accumulation_steps: 2
-  num_epochs: 4
-  early_stop_patience: 2
+  num_epochs: 6
+  early_stop_patience: 3  
   class_weights: false
+  use_focal_loss: true
+  focal_gamma: 2.0
   loss_weights:
     w_ce: 1.0
-    w_supcon: 0.1
-    w_dann: 0.2
+    w_supcon: 0.15
+    w_dann: 0.1
 
 # -----------------------------------------------------------------------------
 # MODE 2: FAMILIES (Specialist)
-# Task: Classify specific AI model (0-9)
+# Task: Classify specific AI model
+# Strategy: LoRA per evitare overfitting su classi rare
 # -----------------------------------------------------------------------------
 families:
   model_name: "microsoft/unixcoder-base"
@@ -46,15 +50,17 @@ families:
   lora_r: 64
   lora_alpha: 128
   lora_dropout: 0.05
-  target_modules: ["query", "value", "key", "dense"]
-  max_length: 384 
-  batch_size: 24
-  gradient_accumulation_steps: 1
+  target_modules: ["query", "value", "key", "dense", "fc", "out_proj"]
+  max_length: 512
+  batch_size: 32
+  gradient_accumulation_steps: 2
   num_epochs: 15
   early_stop_patience: 4
-  class_weights: true
-  learning_rate: 3.0e-4
+  learning_rate: 4.0e-4
+  class_weights: false
+  use_focal_loss: true
+  focal_gamma: 2.5
   loss_weights:
     w_ce: 1.0
-    w_supcon: 0.8
-    w_dann: 0.5
+    w_supcon: 0.2
+    w_dann: 0.1
