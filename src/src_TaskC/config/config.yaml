@@ -37,9 +37,9 @@ training:
   checkpoint_dir: "./results/results_TaskC/checkpoints"
   log_dir: "./results/results_TaskC/logs"
   num_epochs: 10
-  early_stop_patience: 3  
-  batch_size: 8
-  gradient_accumulation_steps: 8  
+  early_stop_patience: 4 
+  batch_size: 64
+  gradient_accumulation_steps: 2
   learning_rate: 0.0002
   evaluation_metric: "f1" 
   warmup_ratio: 0.1

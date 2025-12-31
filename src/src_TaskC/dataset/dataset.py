@@ -62,17 +62,19 @@ class CodeDataset(Dataset):
         code = str(row["code"])
         label = int(row["label"]) 
         lang_str = str(row["language"]).lower()
-        
         lang_id = self.language_map.get(lang_str, -1)
         
         if self.augment:
             code = self._structural_noise(code)
-            if len(code) > self.max_length * 4:
-                max_start = len(code) - int(self.max_length * 3.5)
-                if max_start > 0:
-                    start = random.randint(0, max_start)
-                    code = code[start : start + int(self.max_length * 4)]
 
+        tokens = self.tokenizer.tokenize(code)
+        
+        max_tokens = self.max_length - 2
+        
+        if len(tokens) > max_tokens:
+            half_len = max_tokens // 2
+            tokens = tokens[:half_len] + tokens[-half_len:]
+        
         encoding = self.tokenizer(
             code,
             truncation=True,
@@ -80,13 +82,12 @@ class CodeDataset(Dataset):
             max_length=self.max_length,
             return_tensors="pt"
         )
-        
-        input_ids = encoding["input_ids"].squeeze(0)
-        attention_mask = encoding["attention_mask"].squeeze(0)
 
+        input_ids = encoding["input_ids"].squeeze(0)
+        
         return {
             "input_ids": input_ids,
-            "attention_mask": attention_mask,
+            "attention_mask": encoding["attention_mask"].squeeze(0),
             "labels": torch.tensor(label, dtype=torch.long),
             "lang_ids": torch.tensor(lang_id, dtype=torch.long)
         }

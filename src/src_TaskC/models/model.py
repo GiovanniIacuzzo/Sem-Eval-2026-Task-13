@@ -209,9 +209,9 @@ class CodeClassifier(nn.Module):
         
         acc = accuracy_score(labels, preds)
         
-        p, r, f1, _ = precision_recall_fscore_support(labels, preds, average="macro", zero_division=0)
+        p, r, f1, _ = precision_recall_fscore_support(labels, preds, average="weighted", zero_division=0)
         
-        _, _, f1_per_class, _ = precision_recall_fscore_support(labels, preds, average=None, zero_division=0)
+        precision_cls, recall_cls, f1_cls, _ = precision_recall_fscore_support(labels, preds, average=None, zero_division=0)
         
         metrics = {
             "accuracy": acc, 
@@ -220,10 +220,7 @@ class CodeClassifier(nn.Module):
             "f1": f1
         }
         
-        if len(f1_per_class) >= 4:
-            metrics["f1_human"] = f1_per_class[0]
-            metrics["f1_ai"] = f1_per_class[1]
-            metrics["f1_hybrid"] = f1_per_class[2]
-            metrics["f1_adv"] = f1_per_class[3]
+        for i, score in enumerate(f1_cls):
+            metrics[f"f1_class_{i}"] = score
             
         return metrics
