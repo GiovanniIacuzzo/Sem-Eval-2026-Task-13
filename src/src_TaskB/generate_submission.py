@@ -3,13 +3,14 @@ import logging
 import torch
 import pandas as pd
 from tqdm import tqdm
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 import transformers.utils.import_utils
 transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
 
 from src.src_TaskB.models.model import CodeClassifier
+from src.src_TaskB.dataset.Inference_dataset import SubmissionDataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,25 +30,6 @@ BINARY_CFG = {
 FAMILIES_CFG = {
     "model": {"model_name": "microsoft/unixcoder-base", "num_labels": 10, "use_lora": True, "lora_r": 64}
 }
-
-class SubmissionDataset(Dataset):
-    def __init__(self, dataframe, tokenizer, max_length=512):
-        self.data = dataframe
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        code = str(self.data.at[idx, 'code'])
-        encoding = self.tokenizer(
-            code, truncation=True, padding="max_length", max_length=self.max_length, return_tensors="pt"
-        )
-        return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0)
-        }
 
 def load_model(checkpoint_dir, config, device, name):
     logger.info(f"[{name}] Loading model from {checkpoint_dir}...")

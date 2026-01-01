@@ -1,56 +1,43 @@
-import pandas as pd
 from torch.utils.data import Dataset
-from transformers import PreTrainedTokenizer
-from typing import Dict, Any
 
-class InferenceDataset(Dataset):
-    """
-     optimized PyTorch Dataset designed specifically for the Inference/Submission phase.
-    
-    Key Features:
-    - ID Persistence: Preserves sample IDs required for the submission CSV.
-    - Deterministic Behavior: No augmentation is applied to ensure reproducible results.
-    - Type Safety: Handles mixed-type columns in Pandas dataframes robustly.
-    """
-    
-    def __init__(
-        self, 
-        dataframe: pd.DataFrame, 
-        tokenizer: PreTrainedTokenizer, 
-        max_length: int = 384, 
-        id_col: str = "id"
-    ):
-        """
-        Args:
-            dataframe (pd.DataFrame): Input data containing source code.
-            tokenizer (PreTrainedTokenizer): HuggingFace tokenizer instance.
-            max_length (int): Maximum sequence length for truncation/padding.
-            id_col (str): Name of the column containing unique sample IDs.
-        """
+class SlidingWindowDataset(Dataset):
+    def __init__(self, dataframe, tokenizer, max_length, id_col, label_col, stride=384):
         self.data = dataframe.reset_index(drop=True)
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.id_col = id_col
+        self.label_col = label_col
+        self.stride = stride 
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        """
-        Retrieves a sample, tokenizes the code, and returns input tensors with the ID.
-        """
-        code = str(self.data.loc[idx, "code"])
-        id_val = str(self.data.loc[idx, self.id_col])
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        code = str(row["code"])
+        sample_id = row[self.id_col]
+        label = int(row[self.label_col]) if self.label_col in row else -1
 
-        encoding = self.tokenizer(
-            code,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-            return_tensors="pt"
-        )
+        # Tokenizza
+        tokens = self.tokenizer.tokenize(code)
         
-        item = {key: val.squeeze(0) for key, val in encoding.items()}
-        item["id"] = id_val
+        max_tokens_limit = self.max_length - 2
+        chunks = []
         
-        return item
+        if len(tokens) <= max_tokens_limit:
+            chunks = [code]
+        else:
+            # Sliding Window
+            for i in range(0, len(tokens), self.stride):
+                chunk_tokens = tokens[i : i + max_tokens_limit]
+                chunk_str = self.tokenizer.convert_tokens_to_string(chunk_tokens)
+                chunks.append(chunk_str)
+                if i + max_tokens_limit >= len(tokens):
+                    break
+        
+        return {
+            "id": sample_id,
+            "chunks": chunks,
+            "label": label,
+            "num_chunks": len(chunks)
+        }

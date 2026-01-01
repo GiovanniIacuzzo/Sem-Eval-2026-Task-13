@@ -63,12 +63,6 @@ Queste informazioni aiutano a capire:
 ## 🚀 Istruzioni per l'Esecuzione
 
 ### 1. Addestramento
-Prima di avviare il train ricordati di fare la data agumentation tramite:
-```bash
-python -m src.src_TaskA.scripts.augment_data
-```
-terminato lo script genererai nel file `train_augmented.parquet` che verrà usato nel train successivamente.
-
 Per avviare la training pipeline con logging su console, TensorBoard e CometML:
 ```bash
 python -m src.src_TaskA.train
