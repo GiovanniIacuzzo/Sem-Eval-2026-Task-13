@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import gc
 from typing import Dict, List
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, f1_score, classification_report
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, precision_recall_curve, classification_report
 from torch.amp import autocast
 from tqdm import tqdm
 
@@ -37,49 +37,52 @@ def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
 def evaluate(model, dataloader, device):
     model.eval()
     val_loss = 0.0
-    all_preds = []
+    all_probs = []
     all_labels = []
     
     criterion = torch.nn.CrossEntropyLoss()
     
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validating", leave=False, dynamic_ncols=True):
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels = batch["labels"].to(device, non_blocking=True)
+        for batch in tqdm(dataloader, desc="Validating", leave=False):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
             
             with autocast(device_type='cuda', dtype=torch.float16):
-                # Il modello HF ritorna (loss, logits) se labels sono passate,
-                # ma per sicurezza ricalcoliamo o usiamo l'output standard
-                outputs = model(input_ids, attention_mask)
-                # SimpleCodeClassifier ritorna (loss, logits) se labels sono passate al forward,
-                # oppure solo logits se no. Adattiamo in base all'implementazione model.py
-                
-                # Assumendo model.py ritorni (loss, logits)
-                logits = outputs[1] 
+                # (loss, logits)
+                _, logits = model(input_ids, attention_mask)
                 loss = criterion(logits, labels)
             
             val_loss += loss.item()
-            preds = torch.argmax(logits, dim=1).cpu().numpy()
+            probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
             
-            all_preds.extend(preds)
+            all_probs.extend(probs)
             all_labels.extend(labels.cpu().numpy())
             
     avg_loss = val_loss / len(dataloader)
     
-    # Metriche
-    acc = accuracy_score(all_labels, all_preds)
-    f1 = f1_score(all_labels, all_preds, average='binary') # Task A è binario
+    # --- THRESHOLD TUNING ---
+    all_probs = np.array(all_probs)
+    all_labels = np.array(all_labels)
     
-    # Report dettagliato per log
-    report = classification_report(all_labels, all_preds, target_names=["Human", "Machine"], output_dict=True)
+    precisions, recalls, thresholds = precision_recall_curve(all_labels, all_probs)
+    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
+    best_threshold = thresholds[np.argmax(f1_scores)]
+    best_f1_val = np.max(f1_scores)
+    
+    final_preds = (all_probs >= best_threshold).astype(int)
+    
+    report = classification_report(all_labels, final_preds, target_names=["Human", "Machine"], output_dict=True, zero_division=0)
     
     metrics = {
         "loss": avg_loss,
-        "acc": acc,
-        "f1": f1,
+        "acc": report["accuracy"],
+        "f1": best_f1_val,
+        "best_threshold": best_threshold,
         "human_f1": report["Human"]["f1-score"],
-        "machine_f1": report["Machine"]["f1-score"]
+        "machine_f1": report["Machine"]["f1-score"],
+        "precision_machine": report["Machine"]["precision"],
+        "recall_machine": report["Machine"]["recall"]
     }
     
     return metrics

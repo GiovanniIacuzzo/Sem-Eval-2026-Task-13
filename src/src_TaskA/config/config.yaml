@@ -1,12 +1,12 @@
 experiment:
-  name: "TaskA_OOD_SupCon_KFold"
+  name: "subtask-A"
   seed: 42
 
 data:
   train_path: "data/Task_A/train.parquet"
   val_path: "data/Task_A/validation.parquet"
   max_length: 512
-  max_samples_per_language: 10000 
+  max_samples_per_language: 8000 
   balance_languages: true
   num_workers: 4
 
@@ -15,24 +15,25 @@ model:
   num_labels: 2
   use_supcon: true
   contrastive_temp: 0.1
-  contrastive_weight: 0.5
+  contrastive_weight: 0.4
   use_dann: true
-  dann_weight: 0.1
+  dann_weight: 0.2 
   use_lora: true
   lora:
     r: 16
     alpha: 32
     dropout: 0.1
+    target_modules: ["query", "key", "value", "dense"]
 
 training:
   output_dir: "./results/results_TaskA"
   checkpoint_dir: "./results/results_TaskA/checkpoints"
-  k_folds: 1
-  num_epochs: 1
-  batch_size: 16          
-  grad_accum_steps: 2
-  learning_rate: 1.0e-4
-  weight_decay: 0.05
+  k_folds: 5
+  num_epochs: 5 
+  batch_size: 32          
+  grad_accum_steps: 1
+  learning_rate: 2.0e-4 
+  weight_decay: 0.01
   max_grad_norm: 1.0
   warmup_ratio: 0.1
   patience: 2
