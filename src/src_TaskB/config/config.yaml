@@ -46,7 +46,7 @@ binary:
 families:
   model_name: "microsoft/unixcoder-base"
   num_labels: 10
-  use_lora: true
+  use_lora: false
   lora_r: 64
   lora_alpha: 128
   lora_dropout: 0.1
@@ -54,12 +54,12 @@ families:
   max_length: 512
   batch_size: 32
   gradient_accumulation_steps: 2
-  num_epochs: 15
-  early_stop_patience: 4
-  learning_rate: 4.0e-4
-  class_weights: false
+  num_epochs: 10
+  early_stop_patience: 3
+  learning_rate: 2.0e-5
+  class_weights: true
   use_focal_loss: true
-  focal_gamma: 2.5
+  focal_gamma: 2.0
   loss_weights:
     w_ce: 1.0
     w_supcon: 0.2
