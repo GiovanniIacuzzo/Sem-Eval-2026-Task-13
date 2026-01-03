@@ -17,84 +17,89 @@ class CodeDataset(Dataset):
         self.max_length = max_length
         self.is_test = is_test
         self.augment = augment
+        
+        self.keywords = {
+            'python': {'def', 'import', 'from', 'class', 'self', 'elif', 'None', 'print'},
+            'java': {'public', 'static', 'void', 'private', 'protected', 'new', 'final', 'class'},
+            'cpp': {'include', 'std', 'cout', 'vector', 'using', 'namespace', 'template', 'void'}
+        }
 
-    def __len__(self):
-        return len(self.data)
-
-    def _remove_comments(self, code):
-        # Rimuove commenti stile C (//) e Python/Ruby (#)
-        code = re.sub(r'//.*', '', code)
-        code = re.sub(r'#.*', '', code)
-        # Rimuove commenti multi-riga /* ... */
-        code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
+    def _mask_keywords(self, code, lang):
+        lang_keywords = self.keywords.get(lang.lower(), set())
+        for kw in lang_keywords:
+            if random.random() < 0.4:
+                code = re.sub(r'\b' + re.escape(kw) + r'\b', self.tokenizer.mask_token, code)
         return code
 
-    def _rename_variables(self, code):
-        keywords = {'if', 'else', 'for', 'while', 'return', 'def', 'class', 'import', 'from', 'public', 'static', 'void', 'int', 'float'}
-        words = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', code)
+    def _apply_augmentation(self, code, lang):
+        code = re.sub(r'//.*|#.*|/\*.*?\*/', '', code, flags=re.DOTALL)
         
-        unique_vars = sorted(list(set([w for w in words if w not in keywords and len(w) > 2])))
-        
-        var_map = {v: f"VAR_{i}" for i, v in enumerate(unique_vars)}
-        
-        for original, replacement in var_map.items():
-            code = re.sub(r'\b' + re.escape(original) + r'\b', replacement, code)
-        return code
+        if not self.augment: return code
 
-    def _apply_augmentation(self, code):
-        if not self.augment:
-            return code
-        
-        # 1. Rimuovi commenti
-        if random.random() < 0.7:
-            code = self._remove_comments(code)
-        
-        # 2. Rinomina variabili
-        if random.random() < 0.4:
-            code = self._rename_variables(code)
+        if random.random() < 0.6:
+            words = re.findall(r'\b[a-z_][a-z0-9_]{3,}\b', code)
+            for w in set(words):
+                if random.random() < 0.7:
+                    code = re.sub(r'\b'+w+r'\b', f"var_{random.randint(0,99)}", code)
+
+        if random.random() < 0.5:
+            code = self._mask_keywords(code, lang)
             
-        # 3. Rumore strutturale
-        lines = code.split('\n')
-        new_lines = []
-        for line in lines:
-            if not line.strip(): continue
-            if random.random() < 0.05: new_lines.append("")
-            if random.random() < 0.1: 
-                line = line + (" " * random.randint(1, 3))
-            new_lines.append(line)
-            
-        return "\n".join(new_lines)
+        return code
 
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
-        code = str(row['code']) if row['code'] is not None else ""
+        lang_str = str(row['language']).lower()
+        code = self._apply_augmentation(str(row['code']), lang_str)
         
-        if self.augment:
-            code = self._apply_augmentation(code)
-        
-        lang_str = str(row['language']).lower() if 'language' in row else 'unknown'
-        lang_id = self.language_map.get(lang_str, 0) 
-
         encoding = self.tokenizer(
-            code, 
-            truncation=True, 
-            padding="max_length", 
-            max_length=self.max_length, 
-            return_tensors="pt"
+            code, truncation=True, padding="max_length", 
+            max_length=self.max_length, return_tensors="pt"
         )
-
+        
         item = {
             "input_ids": encoding["input_ids"].squeeze(0),
             "attention_mask": encoding["attention_mask"].squeeze(0),
-            "lang_ids": torch.tensor(lang_id, dtype=torch.long)
+            "lang_ids": torch.tensor(self.language_map.get(lang_str, 0), dtype=torch.long)
         }
-        
         if not self.is_test:
             item["labels"] = torch.tensor(int(row['label']), dtype=torch.long)
-            
         return item
 
+def load_data_raw(config):
+    """Carica i file parquet e uniforma le colonne."""
+    logger.info("Loading Raw Datasets...")
+    df_train = pd.read_parquet(config["data"]["train_path"])
+    df_val = pd.read_parquet(config["data"]["val_path"])
+    
+    for df in [df_train, df_val]:
+        if 'original_code' in df.columns: df.rename(columns={'original_code': 'code'}, inplace=True)
+        if 'original_lang' in df.columns: df.rename(columns={'original_lang': 'language'}, inplace=True)
+        df['language'] = df['language'].str.lower().fillna('unknown')
+        
+    return df_train, df_val
+
+def balance_dataframe(df, config):
+    """Bilancia il dataset per lingua e classe (AI/Human)."""
+    max_samples = config["data"].get("max_samples_per_language", 15000)
+    balanced_dfs = []
+    
+    for lang in df['language'].unique():
+        lang_df = df[df['language'] == lang]
+        for label in [0, 1]:
+            subset = lang_df[lang_df['label'] == label]
+            if len(subset) == 0: continue
+            
+            n_samples = min(len(subset), max_samples)
+            replace = True if len(subset) < 2000 else False
+            if replace: n_samples = max(n_samples, 2000)
+            
+            balanced_dfs.append(subset.sample(n=int(n_samples), replace=replace, random_state=42))
+
+    return pd.concat(balanced_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
+
 def get_dann_class_weights(df, language_map, device):
+    """Calcola i pesi per il classificatore di lingua (DANN)."""
     valid_langs = [l for l in df['language'] if l in language_map]
     if not valid_langs: return None
     
@@ -106,34 +111,3 @@ def get_dann_class_weights(df, language_map, device):
     for cls_idx, w in zip(classes, weights):
         weight_tensor[cls_idx] = torch.tensor(w, dtype=torch.float)
     return weight_tensor
-
-def balance_dataframe(df, config):
-    max_samples = config["data"].get("max_samples_per_language", 15000)
-    
-    balanced_dfs = []
-    for lang in df['language'].unique():
-        lang_df = df[df['language'] == lang]
-        for label in [0, 1]:
-            subset = lang_df[lang_df['label'] == label]
-            if len(subset) == 0: continue
-            
-            n_samples = min(len(subset), max_samples)
-            
-            replace = True if len(subset) < 2000 else False
-            if replace: n_samples = 2000
-            
-            balanced_dfs.append(subset.sample(n=n_samples, replace=replace, random_state=42))
-
-    return pd.concat(balanced_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
-
-def load_data_raw(config):
-    logger.info("Loading Raw Datasets...")
-    df_train = pd.read_parquet(config["data"]["train_path"])
-    df_val = pd.read_parquet(config["data"]["val_path"])
-    
-    for df in [df_train, df_val]:
-        if 'original_code' in df.columns: df.rename(columns={'original_code': 'code'}, inplace=True)
-        if 'original_lang' in df.columns: df.rename(columns={'original_lang': 'language'}, inplace=True)
-        df['language'] = df['language'].str.lower().fillna('unknown')
-        
-    return df_train, df_val

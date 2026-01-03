@@ -1,6 +1,7 @@
 import torch
 import numpy as np
-import gc
+import os
+import random
 from typing import Dict, List
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, precision_recall_curve, classification_report
 from torch.amp import autocast
@@ -30,6 +31,25 @@ def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
         "precision": float(precision_m),
         "recall": float(recall_m)
     }
+
+def set_seed(seed: int = 42):
+    """
+    Blocca i seed per garantire la riproducibilità dei risultati.
+    Copre Python, NumPy, PyTorch e le ottimizzazioni CUDA.
+    """
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    np.random.seed(seed)
+    
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    print(f"Global seed set to: {seed}")
 
 # -----------------------------------------------------------------------------
 # Evaluation Loop
