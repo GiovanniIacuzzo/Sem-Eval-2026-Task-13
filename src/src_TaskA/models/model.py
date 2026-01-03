@@ -50,7 +50,8 @@ class SupConLoss(nn.Module):
         mask = torch.eq(labels, labels.T).float().to(device)
         logits = torch.div(torch.matmul(features, features.T), self.temperature)
         logits_max, _ = torch.max(logits, dim=1, keepdim=True)
-        logits = logits - logits_max.detach()
+        logits = logits - logits_max.detach() # Stabilità numerica
+        
         logits_mask = torch.scatter(torch.ones_like(mask), 1, torch.arange(batch_size).view(-1, 1).to(device), 0)
         mask = mask * logits_mask
         exp_logits = torch.exp(logits) * logits_mask
@@ -62,8 +63,12 @@ class CodeClassifier(nn.Module):
         super().__init__()
         model_cfg = config["model"]
         self.num_languages = model_cfg.get("num_languages", 3)
-        self.dann_weight = 0.4
-        self.contrastive_weight = 0.6
+        self.dann_weight = model_cfg.get("dann_weight", 0.4)
+        self.contrastive_weight = model_cfg.get("contrastive_weight", 0.6)
+        label_smoothing = model_cfg.get("label_smoothing", 0.15)
+        dropout_prob = model_cfg.get("dropout", 0.4)
+        
+        print(f">> Specialist Model Loaded: {self.num_languages} Languages for DANN")
         
         self.base_model = AutoModel.from_pretrained(model_cfg['model_name'])
         self.hidden_size = self.base_model.config.hidden_size
@@ -71,35 +76,52 @@ class CodeClassifier(nn.Module):
         
         self.classifier = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size // 2),
-            nn.Mish(), nn.Dropout(0.4), nn.Linear(self.hidden_size // 2, 2)
+            nn.Mish(),
+            nn.Dropout(dropout_prob),
+            nn.Linear(self.hidden_size // 2, 2)
         )
+        
         self.language_classifier = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size // 2),
-            nn.BatchNorm1d(self.hidden_size // 2), nn.Mish(),
+            nn.BatchNorm1d(self.hidden_size // 2),
+            nn.Mish(),
             nn.Linear(self.hidden_size // 2, self.num_languages)
         )
+        
         self.projection_head = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size // 2),
-            nn.Mish(), nn.Linear(self.hidden_size // 2, 128)
+            nn.Mish(),
+            nn.Linear(self.hidden_size // 2, 128)
         )
 
-        self.main_loss_fn = FocalLoss(gamma=2.5, smoothing=0.15)
+        self.main_loss_fn = FocalLoss(gamma=2.5, smoothing=label_smoothing)
         self.dann_loss_fn = nn.CrossEntropyLoss(weight=dann_lang_weights)
-        self.supcon_loss = SupConLoss()
+        self.supcon_loss = SupConLoss(temperature=model_cfg.get("contrastive_temp", 0.07))
 
     def forward(self, input_ids, attention_mask, lang_ids=None, labels=None, alpha=0.0):
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
+        
         features = self.pooler(outputs.last_hidden_state, attention_mask)
+        
         logits = self.classifier(features)
         
         loss = None
         if labels is not None:
             l_task = self.main_loss_fn(logits, labels)
+            
             proj_feats = F.normalize(self.projection_head(features), p=2, dim=1)
             l_con = self.supcon_loss(proj_feats, labels)
+            
             l_dann = 0.0
-            if lang_ids is not None:
+            if lang_ids is not None and alpha > 0:
                 rev_feats = GradientReversalFn.apply(features, alpha)
-                l_dann = self.dann_loss_fn(self.language_classifier(rev_feats), lang_ids)
+                lang_logits = self.language_classifier(rev_feats)
+                
+                if lang_logits.shape[1] > lang_ids.max():
+                    l_dann = self.dann_loss_fn(lang_logits, lang_ids)
+                else:
+                    l_dann = F.cross_entropy(lang_logits, lang_ids)
+            
             loss = l_task + (self.contrastive_weight * l_con) + (self.dann_weight * l_dann)
+            
         return loss, logits
