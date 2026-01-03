@@ -11,20 +11,40 @@ OUTPUT_DIR = "data/Task_B_Processed"
 TRAIN_FILE = "train.parquet"
 VAL_FILE = "validation.parquet"
 
-# --- FAMIGLIE ---
 FAMILY_GROUPS = {
-    'gpt': 'gpt',
-    'llama': 'llama',
-    'qwen': 'qwen',
-    'phi': 'phi',
-    'mistral': 'mistral',
-    'granite': 'granite',
-    'deepseek': 'deepseek',
-    'starcoder': 'starcoder',
-    'gemma': 'gemma',
-    'yi': 'yi',
-    'codestral': 'mistral',
-    'claude': 'anthropic',
+    # 01-ai
+    'yi': '01-ai',
+    
+    # BigCode
+    'starcoder': 'BigCode',
+    'santa': 'BigCode',
+    'bigcode': 'BigCode',
+    
+    # DeepSeek-AI
+    'deepseek': 'DeepSeek-AI',
+    
+    # Gemma
+    'gemma': 'Gemma',
+    
+    # IBM-Granite
+    'granite': 'IBM-Granite',
+    
+    # Meta-LLaMA
+    'llama': 'Meta-LLaMA',
+    
+    # Mistral
+    'mistral': 'Mistral',
+    'codestral': 'Mistral',
+    
+    # OpenAI
+    'openai': 'OpenAI',
+    'gpt': 'OpenAI',
+    
+    # Phi
+    'phi': 'Phi',
+    
+    # Qwen
+    'qwen': 'Qwen'
 }
 
 def get_family_name(generator_str):

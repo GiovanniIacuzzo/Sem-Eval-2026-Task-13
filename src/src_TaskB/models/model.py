@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel, AutoConfig
-import numpy as np
-from sklearn.metrics import accuracy_score, f1_score
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=None, gamma=2.0, smoothing=0.1, reduction='mean'):
@@ -61,13 +59,21 @@ class CodeClassifier(nn.Module):
         training_cfg = config.get("training", {})
         
         self.model_name = model_cfg.get("model_name", "microsoft/unixcoder-base")
-        self.num_labels = int(model_cfg.get("num_labels", 13))
+        self.num_labels = int(model_cfg.get("num_labels", 11))
         self.num_extra = 8
+        self.extra_proj_dim = 64
         
         hf_config = AutoConfig.from_pretrained(self.model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.base_model = AutoModel.from_pretrained(self.model_name, config=hf_config)
         self.hidden_size = hf_config.hidden_size
+
+        self.extra_projector = nn.Sequential(
+            nn.Linear(self.num_extra, self.extra_proj_dim),
+            nn.BatchNorm1d(self.extra_proj_dim),
+            nn.Mish(),
+            nn.Dropout(0.1)
+        )
 
         self.projection_head = nn.Sequential(
             nn.Linear(self.hidden_size, self.hidden_size // 2),
@@ -75,8 +81,9 @@ class CodeClassifier(nn.Module):
             nn.Linear(self.hidden_size // 2, 128)
         )
 
+        combined_dim = self.hidden_size + self.extra_proj_dim
         self.classifier = nn.Sequential(
-            nn.Linear(self.hidden_size + self.num_extra, self.hidden_size),
+            nn.Linear(combined_dim, self.hidden_size),
             nn.LayerNorm(self.hidden_size),
             nn.Mish(),
             nn.Dropout(0.3),
@@ -85,44 +92,25 @@ class CodeClassifier(nn.Module):
         
         focal_gamma = float(training_cfg.get("focal_gamma", 2.0))
         smoothing = float(training_cfg.get("label_smoothing", 0.1))
-        
-        print(f">> Specialist Model Loaded: {self.num_labels} Families")
-        print(f">> Fusion Enabled: {self.hidden_size} (Semantic) + {self.num_extra} (Stylistic)")
-        
         self.loss_fn = FocalLoss(alpha=class_weights, gamma=focal_gamma, smoothing=smoothing)
 
-    def forward(self, input_ids, attention_mask, labels=None, extra_features=None, alpha=0.0, **kwargs):
+    def forward(self, input_ids, attention_mask, labels=None, extra_features=None):
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
-        
-        cls_embedding = outputs.last_hidden_state[:, 0, :] 
-        
-        if extra_features is not None and extra_features.numel() > 0:
-            combined_input = torch.cat([cls_embedding, extra_features], dim=1)
+        semantic_features = outputs.last_hidden_state[:, 0, :]
+
+        if extra_features is not None:
+            style_features = self.extra_projector(extra_features)
         else:
-            dummy_extra = torch.zeros(cls_embedding.size(0), self.num_extra).to(cls_embedding.device)
-            combined_input = torch.cat([cls_embedding, dummy_extra], dim=1)
+            style_features = torch.zeros(semantic_features.size(0), self.extra_proj_dim).to(semantic_features.device)
+        
+        combined_input = torch.cat([semantic_features, style_features], dim=1)
         
         logits = self.classifier(combined_input)
         
-        proj_features = F.normalize(self.projection_head(cls_embedding), p=2, dim=1)
+        proj_features = F.normalize(self.projection_head(semantic_features), p=2, dim=1)
         
         loss = None
         if labels is not None:
             loss = self.loss_fn(logits, labels)
             
         return logits, loss, proj_features
-
-    def compute_metrics(self, preds, labels):
-        preds = np.array(preds)
-        labels = np.array(labels)
-        if preds.ndim > 1: preds = np.argmax(preds, axis=1)
-        
-        acc = accuracy_score(labels, preds)
-        f1_macro = f1_score(labels, preds, average="macro")
-        f1_weighted = f1_score(labels, preds, average="weighted")
-        
-        return {
-            "accuracy": acc, 
-            "f1_macro": f1_macro, 
-            "f1_weighted": f1_weighted
-        }

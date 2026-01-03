@@ -3,8 +3,12 @@ import pandas as pd
 import numpy as np
 import os
 import re
+import logging
 from torch.utils.data import Dataset
 from sklearn.utils.class_weight import compute_class_weight
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 class CodeDataset(Dataset):
     def __init__(self, dataframe, tokenizer, max_length=512, mode="binary", is_train=False):
@@ -13,80 +17,70 @@ class CodeDataset(Dataset):
         self.mode = mode
         self.is_train = is_train
         
-        self.samples = []
+        self.input_ids = []
+        self.attention_masks = []
+        self.labels = []
+        self.extra_features = []
         
         codes = dataframe['code'].astype(str).tolist()
-        
         if self.mode == "binary":
-            labels = dataframe['is_ai'].astype(int).tolist()
-        elif self.mode == "families":
-            labels = dataframe['family_label'].astype(int).tolist()
+            raw_labels = dataframe['is_ai'].astype(int).tolist()
+        else:
+            raw_labels = dataframe['family_label'].astype(int).tolist()
         
         stride = 256
-        print(f"[{'Train' if is_train else 'Val'}] Processing {len(codes)} files with Stylistic Extraction...")
+        desc = f"[{'Train' if is_train else 'Val'}] Tokenizing & Extracting"
         
-        for i, code in enumerate(codes):
-            label = labels[i]
+        for i, code in enumerate(tqdm(codes, desc=desc, leave=False)):
+            label = raw_labels[i]
             stylistic_feats = self._extract_stylistic_features(code)
             
             tokens = tokenizer.tokenize(code)
             capacity = max_length - 2
             
+            processed_chunks = []
             if len(tokens) <= capacity:
-                self.samples.append({
-                    "code_str": code,
-                    "label": label,
-                    "extra_features": stylistic_feats
-                })
+                processed_chunks.append(code)
             else:
                 if is_train:
-                    for start_idx in range(0, len(tokens), stride):
+                    for count, start_idx in enumerate(range(0, len(tokens), stride)):
+                        if count >= 3: break 
                         end_idx = min(start_idx + capacity, len(tokens))
-                        chunk_tokens = tokens[start_idx:end_idx]
-                        chunk_str = tokenizer.convert_tokens_to_string(chunk_tokens)
-                        
-                        self.samples.append({
-                            "code_str": chunk_str,
-                            "label": label,
-                            "extra_features": stylistic_feats
-                        })
-                        if end_idx >= len(tokens): break
+                        chunk_str = tokenizer.convert_tokens_to_string(tokens[start_idx:end_idx])
+                        processed_chunks.append(chunk_str)
                 else:
                     half = capacity // 2
-                    head = tokens[:half]
-                    tail = tokens[-half:]
-                    chunk_str = tokenizer.convert_tokens_to_string(head + tail)
-                    self.samples.append({
-                        "code_str": chunk_str,
-                        "label": label,
-                        "extra_features": stylistic_feats
-                    })
+                    chunk_str = tokenizer.convert_tokens_to_string(tokens[:half] + tokens[-half:])
+                    processed_chunks.append(chunk_str)
 
-        print(f"[{'Train' if is_train else 'Val'}] Total Samples: {len(self.samples)}")
+            for chunk in processed_chunks:
+                encoding = self.tokenizer(
+                    chunk,
+                    truncation=True,
+                    padding="max_length",
+                    max_length=self.max_length,
+                    return_tensors="pt"
+                )
+                self.input_ids.append(encoding["input_ids"].squeeze(0))
+                self.attention_masks.append(encoding["attention_mask"].squeeze(0))
+                self.labels.append(torch.tensor(label, dtype=torch.long))
+                self.extra_features.append(stylistic_feats)
+
+        print(f"[{'Train' if is_train else 'Val'}] Final Samples: {len(self.labels)}")
 
     def _extract_stylistic_features(self, code):
-        """
-        Estrae un vettore di 8 caratteristiche che definiscono la 'firma' dell'LLM.
-        Questi valori vengono normalizzati per aiutare la convergenza.
-        """
         features = []
         lines = code.split('\n')
         non_empty_lines = [l for l in lines if l.strip()]
         code_len = len(code) + 1
         
         features.append(code.count(' ') / code_len)
-        
-        comment_chars = code.count('#') + code.count('//') + (code.count('/*') * 2)
-        features.append(comment_chars / code_len)
-        
-        special_chars = len(re.findall(r'[{}()\[\];.,]', code))
-        features.append(special_chars / code_len)
+        features.append((code.count('#') + code.count('//')) / code_len)
+        features.append(len(re.findall(r'[{}()\[\];.,]', code)) / code_len)
         
         avg_line_len = np.mean([len(l) for l in non_empty_lines]) if non_empty_lines else 0
         features.append(min(avg_line_len / 100.0, 1.0))
-        
-        empty_ratio = (len(lines) - len(non_empty_lines)) / (len(lines) + 1)
-        features.append(empty_ratio)
+        features.append((len(lines) - len(non_empty_lines)) / (len(lines) + 1))
         
         snake_count = code.count('_')
         camel_count = len(re.findall(r'[a-z][A-Z]', code))
@@ -101,44 +95,41 @@ class CodeDataset(Dataset):
         return torch.tensor(features, dtype=torch.float)
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.labels)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        
-        encoding = self.tokenizer(
-            sample["code_str"],
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-            return_tensors="pt"
-        )
-
         return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "labels": torch.tensor(sample["label"], dtype=torch.long),
-            "extra_features": sample["extra_features"] 
+            "input_ids": self.input_ids[idx],
+            "attention_mask": self.attention_masks[idx],
+            "labels": self.labels[idx],
+            "extra_features": self.extra_features[idx] 
         }
 
 def load_data(config, tokenizer, mode="binary"):
-    common_cfg = config["data"]
-    data_dir = common_cfg.get("data_dir", "data/Task_B_Processed")
-    
-    train_path = os.path.join(data_dir, f"train_{mode}.parquet")
-    val_path = os.path.join(data_dir, f"val_{mode}.parquet")
-    
-    train_df = pd.read_parquet(train_path)
-    val_df = pd.read_parquet(val_path)
+    data_dir = config["data"].get("data_dir", "data/Task_B_Processed")
+    train_df = pd.read_parquet(os.path.join(data_dir, f"train_{mode}.parquet"))
+    val_df = pd.read_parquet(os.path.join(data_dir, f"val_{mode}.parquet"))
+
+    if mode == "binary":
+        df_ai = train_df[train_df['is_ai'] == 1]
+        df_human = train_df[train_df['is_ai'] == 0].sample(n=min(len(df_ai), 30000), random_state=42)
+        train_df = pd.concat([df_ai, df_human]).sample(frac=1, random_state=42)
+        logger.info(f"Binary Downsampled: AI={len(df_ai)}, Human={len(df_human)}")
+    else:
+        if 'family' in train_df.columns:
+            df_human = train_df[train_df['family'] == 'Human']
+            if len(df_human) > 20000:
+                df_other = train_df[train_df['family'] != 'Human']
+                df_human_small = df_human.sample(n=20000, random_state=42)
+                train_df = pd.concat([df_human_small, df_other]).sample(frac=1, random_state=42)
 
     class_weights_tensor = None
     if mode == "families":
         y_train = train_df['family_label'].values
-        classes = np.unique(y_train)
-        cw = compute_class_weight(class_weight='balanced', classes=classes, y=y_train)
+        cw = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
         class_weights_tensor = torch.tensor(cw, dtype=torch.float)
 
-    train_ds = CodeDataset(train_df, tokenizer, max_length=common_cfg["max_length"], mode=mode, is_train=True)
-    val_ds = CodeDataset(val_df, tokenizer, max_length=common_cfg["max_length"], mode=mode, is_train=False)
+    train_ds = CodeDataset(train_df, tokenizer, max_length=config["data"]["max_length"], mode=mode, is_train=True)
+    val_ds = CodeDataset(val_df, tokenizer, max_length=config["data"]["max_length"], mode=mode, is_train=False)
 
     return train_ds, val_ds, class_weights_tensor
