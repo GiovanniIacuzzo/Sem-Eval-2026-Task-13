@@ -5,6 +5,7 @@ from transformers import AutoModel, AutoConfig
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
+# Check for optional libraries
 try:
     from pytorch_metric_learning import losses
     METRIC_LEARNING_AVAILABLE = True
@@ -32,32 +33,43 @@ class GradientReversalFn(torch.autograd.Function):
         return output, None
 
 # -----------------------------------------------------------------------------
-# 2. Focal Loss
+# 2. Focal Loss (Numerically Stable)
 # -----------------------------------------------------------------------------
 class FocalLoss(nn.Module):
-    def __init__(self, weight=None, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=None, gamma=2.0, smoothing=0.1, reduction='mean'):
         super(FocalLoss, self).__init__()
-        self.weight = weight
         self.gamma = gamma
+        self.smoothing = smoothing
         self.reduction = reduction
+        self.register_buffer('alpha_weights', alpha) # Better buffer registration
 
     def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, weight=self.weight, reduction='none')
-        pt = torch.exp(-ce_loss)
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
-
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
+        inputs = inputs.float() # Ensure float32 for loss calculation stability
+        num_classes = inputs.size(-1)
+        log_probs = F.log_softmax(inputs, dim=-1)
+        
+        # Label Smoothing logic
+        targets_smooth = torch.zeros_like(log_probs).scatter_(1, targets.unsqueeze(1), 1)
+        targets_smooth = targets_smooth * (1 - self.smoothing) + self.smoothing / num_classes
+        
+        pt = torch.exp(log_probs)
+        focal_weight = (1 - pt) ** self.gamma
+        
+        loss = -focal_weight * targets_smooth * log_probs
+        
+        if self.alpha_weights is not None:
+            if self.alpha_weights.size(0) == num_classes:
+                # Expand dimensions for broadcasting if necessary
+                loss = loss * self.alpha_weights.view(1, -1)
+            
+        loss = loss.sum(dim=-1)
+        if self.reduction == 'mean': return loss.mean()
+        return loss.sum()
 
 # -----------------------------------------------------------------------------
-# 3. Attention Pooling
+# 3. Attention Pooling (FP16 Safe)
 # -----------------------------------------------------------------------------
 class AttentionHead(nn.Module):
-    """Estrae un vettore riassuntivo pesando l'importanza di ogni token."""
     def __init__(self, hidden_size, dropout_prob=0.1):
         super().__init__()
         self.attn = nn.Sequential(
@@ -68,11 +80,19 @@ class AttentionHead(nn.Module):
         self.dropout = nn.Dropout(dropout_prob)
 
     def forward(self, hidden_states, attention_mask):
+        # attn_scores shape: [batch, seq_len]
         attn_scores = self.attn(hidden_states).squeeze(-1)
-        min_val = -1e4 if hidden_states.dtype == torch.float16 else -1e9
-        attn_scores = attn_scores.masked_fill(attention_mask == 0, min_val)
         
+        # FP16 SAFETY: Use -65504 (min float16) instead of -1e9 to avoid NaN/Inf
+        if attn_scores.dtype == torch.float16:
+            min_val = -65500.0
+        else:
+            min_val = -1e9
+            
+        attn_scores = attn_scores.masked_fill(attention_mask == 0, min_val)
         attn_weights = self.dropout(F.softmax(attn_scores, dim=-1))
+        
+        # Context vector
         return torch.sum(attn_weights.unsqueeze(-1) * hidden_states, dim=1)
 
 # -----------------------------------------------------------------------------
@@ -84,7 +104,7 @@ class CodeClassifier(nn.Module):
         model_cfg = config.get("model", {})
         
         self.model_name = model_cfg.get("model_name", "microsoft/graphcodebert-base")
-        self.num_labels = 4 
+        self.num_labels = model_cfg.get("num_labels", 4)
         self.style_feat_dim = 4
         
         print(f"Loading Backbone: {self.model_name}")
@@ -92,27 +112,34 @@ class CodeClassifier(nn.Module):
         self.base_model = AutoModel.from_pretrained(self.model_name)
         self.hidden_size = self.transformer_config.hidden_size
 
+        # --- PEFT / LoRA Setup ---
         self.use_lora = model_cfg.get("use_lora", True) and PEFT_AVAILABLE
         if self.use_lora:
-            print("Activating LoRA...")
+            print(f"Activating LoRA (r={model_cfg.get('lora_r', 16)})")
             peft_config = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION, 
                 inference_mode=False, 
-                r=16,
-                lora_alpha=32,
+                r=model_cfg.get("lora_r", 16),
+                lora_alpha=model_cfg.get("lora_alpha", 32),
                 lora_dropout=0.1,
                 target_modules=["query", "key", "value", "dense"] 
             )
             self.base_model = get_peft_model(self.base_model, peft_config)
         else:
+            # If full finetuning, enable gradient checkpointing to save VRAM
             self.base_model.gradient_checkpointing_enable()
 
         self.pooler = AttentionHead(self.hidden_size)
         
+        # --- Normalization Layers (CRITICAL for Multi-modal fusion) ---
+        self.norm_semantic = nn.LayerNorm(self.hidden_size)
+        self.norm_style = nn.LayerNorm(self.style_feat_dim)
+        
+        # --- Heads ---
         self.classifier = nn.Sequential(
             nn.Linear(self.hidden_size + self.style_feat_dim, self.hidden_size),
             nn.Mish(),
-            nn.Dropout(0.2),
+            nn.Dropout(model_cfg.get("extra_dropout", 0.2)),
             nn.Linear(self.hidden_size, self.num_labels)
         )
         
@@ -127,15 +154,18 @@ class CodeClassifier(nn.Module):
             nn.Linear(self.hidden_size, 128)
         )
 
+        # Init custom layers
         self._init_weights(self.classifier)
         self._init_weights(self.language_classifier)
+        self._init_weights(self.projection_head)
 
-        if class_weights is not None:
-            self.register_buffer('class_weights', class_weights)
-        else:
-            self.class_weights = None
-
-        self.loss_fn = FocalLoss(weight=self.class_weights, gamma=2.0)
+        # --- Loss Setup ---
+        loss_cfg = config.get("loss_weights", {})
+        self.loss_fn = FocalLoss(
+            alpha=class_weights, # Passed from main
+            gamma=loss_cfg.get("focal_gamma", 2.0),
+            smoothing=config["training"].get("label_smoothing", 0.1)
+        )
         self.dann_loss = nn.CrossEntropyLoss(ignore_index=-1)
         
         if METRIC_LEARNING_AVAILABLE:
@@ -143,53 +173,77 @@ class CodeClassifier(nn.Module):
         else:
             self.supcon_loss = None
 
-        self.contrastive_weight = 0.2
-        self.dann_weight = 0.05
+        self.contrastive_weight = loss_cfg.get("contrastive", 0.2)
+        self.dann_weight = loss_cfg.get("dann", 0.05)
 
     def _init_weights(self, module):
+        """Xavier initialization for linear layers"""
         for m in module.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
 
     def forward(self, input_ids, attention_mask, style_feats=None, lang_ids=None, labels=None, alpha=1.0):
+        # 1. Base Model
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
         last_hidden_state = outputs.last_hidden_state
         
+        # 2. Pooling & Normalization
         semantic_features = self.pooler(last_hidden_state, attention_mask)
+        semantic_features = self.norm_semantic(semantic_features)
 
+        # 3. Style Features Handling
         if style_feats is not None:
+            # FP16 SAFETY: Ensure style feats match the model's dtype (float16 if amp used)
+            style_feats = style_feats.to(dtype=semantic_features.dtype, device=semantic_features.device)
+            style_feats = self.norm_style(style_feats)
             combined_features = torch.cat((semantic_features, style_feats), dim=1)
         else:
-            dummy_style = torch.zeros((semantic_features.size(0), self.style_feat_dim)).to(semantic_features.device)
-            combined_features = torch.cat((semantic_features, dummy_style), dim=1)
+            # Fallback dummy style (should not happen with correct dataloader)
+            dummy = torch.zeros((semantic_features.size(0), self.style_feat_dim), 
+                              dtype=semantic_features.dtype, device=semantic_features.device)
+            combined_features = torch.cat((semantic_features, dummy), dim=1)
 
+        # 4. Main Classification
         task_logits = self.classifier(combined_features)
         
         loss = None
         if labels is not None:
+            # A. Task Loss (Focal)
             loss_task = self.loss_fn(task_logits, labels)
             
+            # B. Contrastive Loss (Supervised Contrastive Learning)
             loss_scl = 0.0
             if self.supcon_loss is not None:
+                # Projection for contrastive loss (only on semantic part usually better)
                 proj = F.normalize(self.projection_head(semantic_features), p=2, dim=1)
                 loss_scl = self.supcon_loss(proj, labels)
             
+            # C. Domain Adaptation Loss (DANN)
             loss_dann = 0.0
             if lang_ids is not None and alpha > 0:
+                # Reverse gradients just for the language classifier
                 reversed_feats = GradientReversalFn.apply(semantic_features, alpha)
                 lang_logits = self.language_classifier(reversed_feats)
                 loss_dann = self.dann_loss(lang_logits, lang_ids)
             
+            # Total Loss
             loss = loss_task + (self.contrastive_weight * loss_scl) + (self.dann_weight * loss_dann)
             
         return task_logits, loss
 
     def compute_metrics(self, preds, labels):
+        # Utilities for robust metric calculation
         preds = np.array(preds)
         labels = np.array(labels)
-        if preds.ndim > 1: preds = np.argmax(preds, axis=1)
+        
+        # Handle if preds are logits or class indices
+        if preds.ndim > 1: 
+            preds = np.argmax(preds, axis=1)
         
         acc = accuracy_score(labels, preds)
         p, r, f1, _ = precision_recall_fscore_support(labels, preds, average="weighted", zero_division=0)

@@ -5,7 +5,10 @@ channels:
   - conda-forge
 dependencies:
   - python=3.10
-  - pip
+  - pytorch>=2.4
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
   - numpy
   - pandas
   - scikit-learn
@@ -13,12 +16,7 @@ dependencies:
   - seaborn
   - tqdm
   - pyyaml
-  - pyarrow
-  - fastparquet
-  - pytorch>=2.6.0
-  - torchvision
-  - torchaudio
-  - pytorch-cuda=12.4 
+  - pip
   - pip:
       - transformers>=4.48.0
       - accelerate>=1.0.0
@@ -31,6 +29,7 @@ dependencies:
       - peft
       - rich
       - regex
-      - bitsandbytes
       - protobuf
       - scipy
+      - bitsandbytes
+      - kaggle

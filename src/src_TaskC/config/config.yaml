@@ -36,7 +36,7 @@ training:
   evaluation_metric: "f1" 
   warmup_ratio: 0.1
   fp16: true
-  label_smoothing: 0.05
+  label_smoothing: 0.2
 
 # ---------------------
 # Loss Weights
