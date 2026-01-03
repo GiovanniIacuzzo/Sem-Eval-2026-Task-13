@@ -1,108 +1,93 @@
 import torch
 import numpy as np
-import os
+import logging
+from typing import Dict, List, Any
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
 import random
-from typing import Dict, List
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, precision_recall_curve, classification_report
-from torch.amp import autocast
-from tqdm import tqdm
+import os
 
-# -----------------------------------------------------------------------------
-# Metric Computation
-# -----------------------------------------------------------------------------
-def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
+logger = logging.getLogger(__name__)
+
+class ConsoleUX:
+    @staticmethod
+    def print_banner(text):
+        print(f"\n{'-'*60}\n{text.center(60)}\n{'-'*60}")
+
+    @staticmethod
+    def log_metrics(stage, metrics):
+        log_str = f"[{stage}] "
+        keys = ["f1_macro", "f1_weighted", "accuracy", "loss"]
+        for k in keys:
+            if k in metrics:
+                log_str += f"{k}: {metrics[k]:.4f} | "
+        logger.info(log_str.strip(" | "))
+
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    logger.info(f"Global seed set to: {seed}")
+
+def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, Any]:
     preds = np.array(preds)
     labels = np.array(labels)
 
     accuracy = accuracy_score(labels, preds)
+    p_macro, r_macro, f1_macro, _ = precision_recall_fscore_support(labels, preds, average='macro', zero_division=0)
+    p_weighted, r_weighted, f1_weighted, _ = precision_recall_fscore_support(labels, preds, average='weighted', zero_division=0)
     
-    precision_m, recall_m, f1_macro, _ = precision_recall_fscore_support(
-        labels, preds, average='macro', zero_division=0
-    )
-    
-    precision_b, recall_b, f1_binary, _ = precision_recall_fscore_support(
-        labels, preds, average='binary', zero_division=0
-    )
-
     return {
         "accuracy": float(accuracy),
-        "f1": float(f1_macro),
-        "f1_binary": float(f1_binary),
-        "precision": float(precision_m),
-        "recall": float(recall_m)
+        "f1_macro": float(f1_macro),
+        "f1_weighted": float(f1_weighted),
+        "precision_macro": float(p_macro),
+        "recall_macro": float(r_macro)
     }
 
-def set_seed(seed: int = 42):
-    """
-    Blocca i seed per garantire la riproducibilità dei risultati.
-    Copre Python, NumPy, PyTorch e le ottimizzazioni CUDA.
-    """
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    
-    np.random.seed(seed)
-    
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    print(f"Global seed set to: {seed}")
-
-# -----------------------------------------------------------------------------
-# Evaluation Loop
-# -----------------------------------------------------------------------------
-def evaluate(model, dataloader, device):
+def evaluate_model(model, dataloader, device, label_names=None):
     model.eval()
-    val_loss = 0.0
-    all_probs = []
+    loss_accum = 0.0
+    all_preds = []
     all_labels = []
     
-    criterion = torch.nn.CrossEntropyLoss()
-    
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validating", leave=False):
+        for batch in dataloader:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
+            extra_features = batch.get("extra_features", None)
+            if extra_features is not None:
+                extra_features = extra_features.to(device)
             
-            with autocast(device_type='cuda', dtype=torch.float16):
-                # (loss, logits)
-                _, logits = model(input_ids, attention_mask)
-                loss = criterion(logits, labels)
+            # Forward pass
+            outputs = model(input_ids, attention_mask, labels=labels, extra_features=extra_features)
             
-            val_loss += loss.item()
-            probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+            # Gestione output (logits, loss, features)
+            if isinstance(outputs, tuple):
+                logits = outputs[0]
+                loss = outputs[1]
+            else:
+                logits = outputs.logits
+                loss = outputs.loss
             
-            all_probs.extend(probs)
+            loss_accum += loss.item()
+            preds = torch.argmax(logits, dim=1).cpu().numpy()
+            all_preds.extend(preds)
             all_labels.extend(labels.cpu().numpy())
-            
-    avg_loss = val_loss / len(dataloader)
+
+    final_loss = loss_accum / len(dataloader)
+    metrics = compute_metrics(all_preds, all_labels)
+    metrics["loss"] = final_loss
     
-    # --- THRESHOLD TUNING ---
-    all_probs = np.array(all_probs)
-    all_labels = np.array(all_labels)
-    
-    precisions, recalls, thresholds = precision_recall_curve(all_labels, all_probs)
-    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
-    best_threshold = thresholds[np.argmax(f1_scores)]
-    best_f1_val = np.max(f1_scores)
-    
-    final_preds = (all_probs >= best_threshold).astype(int)
-    
-    report = classification_report(all_labels, final_preds, target_names=["Human", "Machine"], output_dict=True, zero_division=0)
-    
-    metrics = {
-        "loss": avg_loss,
-        "acc": report["accuracy"],
-        "f1": best_f1_val,
-        "best_threshold": best_threshold,
-        "human_f1": report["Human"]["f1-score"],
-        "machine_f1": report["Machine"]["f1-score"],
-        "precision_machine": report["Machine"]["precision"],
-        "recall_machine": report["Machine"]["recall"]
-    }
-    
-    return metrics
+    report = classification_report(
+        all_labels, 
+        all_preds, 
+        target_names=label_names, 
+        digits=4, 
+        zero_division=0
+    )
+    return metrics, all_preds, all_labels, report

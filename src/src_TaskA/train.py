@@ -1,190 +1,208 @@
 import os
 import sys
-import logging
 import yaml
 import torch
-import gc
-import numpy as np
-import pandas as pd
+import argparse
+import logging
 from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler
 from tqdm import tqdm
+from torch.amp import autocast, GradScaler 
 from dotenv import load_dotenv
-from transformers import AutoTokenizer, logging as transformers_logging
+from sklearn.metrics import confusion_matrix
+from comet_ml import Experiment
+from transformers import AutoTokenizer
 
-transformers_logging.set_verbosity_error()
+import transformers.utils.import_utils
+transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
 
-from src.src_TaskA.models.model import CodeClassifier
-from src.src_TaskA.dataset.dataset import CodeDataset, load_data_raw, balance_dataframe, get_dann_class_weights
-from src.src_TaskA.utils.utils import evaluate, set_seed
+from src.src_TaskA.models.model import CodeModel
+from src.src_TaskA.dataset.dataset import load_data
+from src.src_TaskA.utils.utils import set_seed, evaluate_model, ConsoleUX
+
+# -----------------------------------------------------------------------------
+# Configuration & Setup
+# -----------------------------------------------------------------------------
+torch.backends.cudnn.benchmark = True
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 logging.basicConfig(
-    level=logging.INFO, 
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
     datefmt="%H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-class ConsoleUX:    
-    @staticmethod
-    def header(fold, total_folds, val_lang):
-        """Header per l'inizio di un nuovo Fold LOLO."""
-        print(f"\n{'='*80}")
-        print(f" FOLD {fold+1}/{total_folds} | VALIDATION LANGUAGE: {val_lang.upper()} (OOD TEST)")
-        print(f"{'='*80}")
+def save_checkpoint(model, path, tokenizer):
+    """
+    Salvataggio ottimizzato per LoRA:
+    1. Salva i pesi LoRA (base_model)
+    2. Salva la head di classificazione custom (classifier)
+    3. Salva il tokenizer
+    """
+    os.makedirs(path, exist_ok=True)
+    logger.info(f"Saving model to {path}...")
+    
+    tokenizer.save_pretrained(path)
+    
+    model.base_model.save_pretrained(path)
+    
+    torch.save(model.classifier.state_dict(), os.path.join(path, "classifier_head.pt"))
+    torch.save(model.extra_projector.state_dict(), os.path.join(path, "projector.pt"))
 
-    @staticmethod
-    def log_metrics(epoch, metrics, train_loss):
-        """Log riassuntivo delle metriche a fine epoca."""
-        logger.info(f"--- Epoch {epoch+1} Summary (Out-of-Distribution Validation) ---")
-        logger.info(f" > Loss:        Train {train_loss:.4f} | Val {metrics['loss']:.4f}")
-        logger.info(f" > Performance: F1 {metrics['f1']:.4f} (Threshold: {metrics['best_threshold']:.2f})")
-        logger.info(f" > Class F1:    Human {metrics['human_f1']:.4f} | Machine {metrics['machine_f1']:.4f}")
-        logger.info(f" > Detail (M):  Prec {metrics['precision_machine']:.4f} | Rec {metrics['recall_machine']:.4f}")
-        print("-" * 40)
-
-def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, epoch_idx, total_epochs, accumulation_steps=1):
+def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, 
+                   epoch_idx, total_epochs, accumulation_steps=1):
     model.train()
     running_loss = 0.0
-    len_dl = len(dataloader)
     
-    pbar = tqdm(
-        dataloader, 
-        desc=f"  Training Ep {epoch_idx+1}", 
-        leave=False, 
-        bar_format="{l_bar}{bar:30}{r_bar}"
-    )
+    optimizer.zero_grad()
+    progress_bar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}/{total_epochs}", leave=False, dynamic_ncols=True)
     
-    for step, batch in enumerate(pbar):
+    for step, batch in enumerate(progress_bar):
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
-        lang_ids = batch["lang_ids"].to(device, non_blocking=True)
+        extra_features = batch.get("extra_features", None).to(device, non_blocking=True)
         
-        p = float(step + epoch_idx * len_dl) / (total_epochs * len_dl)
-        alpha = 2. / (1. + np.exp(-10 * p)) - 1
+        dtype_amp = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         
-        with autocast(device_type='cuda', dtype=torch.float16):
-            loss, _ = model(input_ids, attention_mask, lang_ids=lang_ids, labels=labels, alpha=alpha)
+        with autocast(device_type='cuda', dtype=dtype_amp):
+            logits, loss, _ = model(
+                input_ids, attention_mask, labels=labels, extra_features=extra_features
+            )
             loss = loss / accumulation_steps
 
         scaler.scale(loss).backward()
 
         if (step + 1) % accumulation_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            if scheduler: scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
         
         running_loss += loss.item() * accumulation_steps
-        pbar.set_postfix({"loss": f"{loss.item():.3f}", "alpha": f"{alpha:.2f}"})
-        
-    return running_loss / len_dl
+        progress_bar.set_postfix({"Loss": f"{loss.item()*accumulation_steps:.4f}"})
+
+    return {"loss": running_loss / len(dataloader)}
 
 # -----------------------------------------------------------------------------
-# MAIN EXECUTION
+# Main Execution
 # -----------------------------------------------------------------------------
-if __name__ == "__main__":
+def main():
     load_dotenv()
-    set_seed(42)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="src/src_TaskA/config/config.yaml")
+    args = parser.parse_args()
     
-    with open("src/src_TaskA/config/config.yaml", "r") as f:
-        config = yaml.safe_load(f)
+    ConsoleUX.print_banner("SemEval 2026 - Task 13 - Subtask A")
+    set_seed(42)
+
+    # Load Config
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)["common"]
+
+    # Comet ML Setup
+    experiment = Experiment(
+        api_key=os.getenv("COMET_API_KEY"),
+        project_name=os.getenv("COMET_PROJECT_NAME"),
+        auto_metric_logging=False
+    )
+    experiment.set_name(f"TaskA_StarCoder_{config['model_name'].split('/')[-1]}")
+    experiment.log_parameters(config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(config["model"]["model_name"])
+    logger.info(f"Using Device: {device}")
+
+    # Tokenizer & Data
+    tokenizer = AutoTokenizer.from_pretrained(config["model_name"], trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    train_dataset, val_dataset, class_weights = load_data(config, tokenizer)
     
-    df_train_raw, df_val_raw = load_data_raw(config)
-    full_df = pd.concat([df_train_raw, df_val_raw]).reset_index(drop=True)
+    # Task A: Human (0) vs AI (1)
+    label_names = ["Human", "AI"]
+    config["num_labels"] = 2
     
-    languages = sorted(full_df['language'].unique())
-    language_map = {l: i for i, l in enumerate(languages)}
-    config["model"]["num_languages"] = len(language_map)
+    if class_weights is not None:
+        class_weights = class_weights.to(device)
+
+    # Dataloaders
+    train_dl = DataLoader(
+        train_dataset, 
+        batch_size=config["batch_size"], 
+        shuffle=True, 
+        num_workers=4, 
+        pin_memory=True,
+        drop_last=True
+    )
+    val_dl = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=4)
+
+    # Model Setup
+    model = CodeModel(config, class_weights=class_weights)
+    model.to(device)
+
+    # Optimizer
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=float(config["learning_rate"]))
+    scaler = GradScaler()
     
-    logger.info(f"Initialized LOLO Strategy on languages: {languages}")
+    acc_steps = config.get("gradient_accumulation_steps", 1)
+    total_steps = len(train_dl) * config["num_epochs"] // acc_steps
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=float(config["learning_rate"]), total_steps=total_steps)
 
-    for fold, val_lang in enumerate(languages):
-        ConsoleUX.header(fold, len(languages), val_lang)
-        
-        train_df_raw = full_df[full_df['language'] != val_lang]
-        val_df = full_df[full_df['language'] == val_lang]
-        
-        train_df = balance_dataframe(train_df_raw, config)
-        
-        logger.info(f"Training on: {[l for l in languages if l != val_lang]}")
-        logger.info(f"Dataset Sizes -> Train: {len(train_df)} | Val (OOD): {len(val_df)}")
+    # Training Loop
+    best_f1 = 0.0
+    patience_counter = 0
+    patience = config.get("early_stop_patience", 3)
+    checkpoint_dir = config["checkpoint_dir"]
 
-        train_ds = CodeDataset(train_df, tokenizer, language_map, augment=True)
-        val_ds = CodeDataset(val_df, tokenizer, language_map, augment=False)
+    for epoch in range(config["num_epochs"]):
+        ConsoleUX.print_banner(f"Epoch {epoch+1}/{config['num_epochs']}")
         
-        train_dl = DataLoader(
-            train_ds, 
-            batch_size=config["training"]["batch_size"], 
-            shuffle=True, 
-            num_workers=4, 
-            pin_memory=True
+        # Training
+        train_metrics = train_one_epoch(
+            model, train_dl, optimizer, scheduler, scaler, device, 
+            epoch, config["num_epochs"], acc_steps
         )
-        val_dl = DataLoader(
-            val_ds, 
-            batch_size=config["training"]["batch_size"]*2, 
-            shuffle=False, 
-            num_workers=4
-        )
+        experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
+        logger.info(f"Train Loss: {train_metrics['loss']:.4f}")
         
-        dann_weights = get_dann_class_weights(train_df, language_map, device)
-        model = CodeClassifier(config, dann_lang_weights=dann_weights).to(device)
+        # Validation
+        val_metrics, val_preds, val_refs, val_report = evaluate_model(model, val_dl, device, label_names=label_names)
+        
+        ConsoleUX.log_metrics("Valid", val_metrics)
+        experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
+        logger.info(f"\n{val_report}")
 
-        base_lr = float(config["training"]["learning_rate"])
-        optimizer = torch.optim.AdamW([
-            {'params': model.base_model.parameters(), 'lr': base_lr / 10},
-            {'params': [p for n, p in model.named_parameters() if 'base_model' not in n], 'lr': base_lr}
-        ], weight_decay=0.1)
-
-        total_steps = (len(train_dl) // config["training"]["grad_accum_steps"]) * config["training"]["num_epochs"]
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, 
-            max_lr=base_lr, 
-            total_steps=total_steps, 
-            pct_start=0.1
-        )
-        scaler = GradScaler()
-
-        best_f1 = 0
-        patience_counter = 0
-        checkpoint_dir = config["training"]["checkpoint_dir"]
-        os.makedirs(checkpoint_dir, exist_ok=True)
-
-        for epoch in range(config["training"]["num_epochs"]):
-            avg_train_loss = train_one_epoch(
-                model, train_dl, optimizer, scheduler, scaler, device, 
-                epoch, config["training"]["num_epochs"], config["training"]["grad_accum_steps"]
+        current_f1 = val_metrics["f1_macro"]
+        
+        if current_f1 > best_f1:
+            best_f1 = current_f1
+            patience_counter = 0
+            
+            # Save Checkpoint
+            save_path = os.path.join(checkpoint_dir, "best_model")
+            save_checkpoint(model, save_path, tokenizer)
+            
+            cm = confusion_matrix(val_refs, val_preds)
+            experiment.log_confusion_matrix(
+                matrix=cm, 
+                title=f"Confusion Matrix Epoch {epoch}", 
+                labels=label_names
             )
+            logger.info(f"--> New Best F1: {best_f1:.4f}. Model Saved.")
+        else:
+            patience_counter += 1
+            logger.warning(f"No improvement. Patience: {patience_counter}/{patience}")
             
-            metrics = evaluate(model, val_dl, device)
-            
-            ConsoleUX.log_metrics(epoch, metrics, avg_train_loss)
+            if patience_counter >= patience:
+                logger.warning("Early Stopping Triggered")
+                break
+    
+    experiment.end()
 
-            if metrics["f1"] > best_f1:
-                best_f1 = metrics["f1"]
-                patience_counter = 0
-                save_path = os.path.join(checkpoint_dir, f"best_lolo_{val_lang}.pt")
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'threshold': metrics['best_threshold'],
-                    'config': config,
-                    'f1': best_f1,
-                    'val_lang': val_lang
-                }, save_path)
-                logger.info(f"New Best OOD F1: {best_f1:.4f} - Modello salvato per {val_lang}")
-            else:
-                patience_counter += 1
-                if patience_counter >= config["training"].get("patience", 3):
-                    logger.info(f"Early stopping triggerato al Fold {val_lang}")
-                    break
-
-        del model, optimizer, scheduler, train_dl, val_dl
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    logger.info("Pipeline LOLO completata. Modelli pronti per l'inferenza finale.")
+if __name__ == "__main__":
+    main()
