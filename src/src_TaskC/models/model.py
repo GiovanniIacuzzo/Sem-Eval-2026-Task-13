@@ -5,7 +5,6 @@ from transformers import AutoModel, AutoConfig
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
-# Check for optional libraries
 try:
     from pytorch_metric_learning import losses
     METRIC_LEARNING_AVAILABLE = True
@@ -33,7 +32,7 @@ class GradientReversalFn(torch.autograd.Function):
         return output, None
 
 # -----------------------------------------------------------------------------
-# 2. Focal Loss (Numerically Stable)
+# 2. Focal Loss
 # -----------------------------------------------------------------------------
 class FocalLoss(nn.Module):
     def __init__(self, alpha=None, gamma=2.0, smoothing=0.1, reduction='mean'):
@@ -41,14 +40,13 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
         self.smoothing = smoothing
         self.reduction = reduction
-        self.register_buffer('alpha_weights', alpha) # Better buffer registration
+        self.register_buffer('alpha_weights', alpha)
 
     def forward(self, inputs, targets):
-        inputs = inputs.float() # Ensure float32 for loss calculation stability
+        inputs = inputs.float()
         num_classes = inputs.size(-1)
         log_probs = F.log_softmax(inputs, dim=-1)
         
-        # Label Smoothing logic
         targets_smooth = torch.zeros_like(log_probs).scatter_(1, targets.unsqueeze(1), 1)
         targets_smooth = targets_smooth * (1 - self.smoothing) + self.smoothing / num_classes
         
@@ -59,7 +57,6 @@ class FocalLoss(nn.Module):
         
         if self.alpha_weights is not None:
             if self.alpha_weights.size(0) == num_classes:
-                # Expand dimensions for broadcasting if necessary
                 loss = loss * self.alpha_weights.view(1, -1)
             
         loss = loss.sum(dim=-1)
@@ -67,7 +64,7 @@ class FocalLoss(nn.Module):
         return loss.sum()
 
 # -----------------------------------------------------------------------------
-# 3. Attention Pooling (FP16 Safe)
+# 3. Attention Pooling
 # -----------------------------------------------------------------------------
 class AttentionHead(nn.Module):
     def __init__(self, hidden_size, dropout_prob=0.1):
@@ -80,10 +77,8 @@ class AttentionHead(nn.Module):
         self.dropout = nn.Dropout(dropout_prob)
 
     def forward(self, hidden_states, attention_mask):
-        # attn_scores shape: [batch, seq_len]
         attn_scores = self.attn(hidden_states).squeeze(-1)
         
-        # FP16 SAFETY: Use -65504 (min float16) instead of -1e9 to avoid NaN/Inf
         if attn_scores.dtype == torch.float16:
             min_val = -65500.0
         else:
@@ -92,7 +87,6 @@ class AttentionHead(nn.Module):
         attn_scores = attn_scores.masked_fill(attention_mask == 0, min_val)
         attn_weights = self.dropout(F.softmax(attn_scores, dim=-1))
         
-        # Context vector
         return torch.sum(attn_weights.unsqueeze(-1) * hidden_states, dim=1)
 
 # -----------------------------------------------------------------------------
@@ -112,7 +106,6 @@ class CodeClassifier(nn.Module):
         self.base_model = AutoModel.from_pretrained(self.model_name)
         self.hidden_size = self.transformer_config.hidden_size
 
-        # --- PEFT / LoRA Setup ---
         self.use_lora = model_cfg.get("use_lora", True) and PEFT_AVAILABLE
         if self.use_lora:
             print(f"Activating LoRA (r={model_cfg.get('lora_r', 16)})")
@@ -126,16 +119,13 @@ class CodeClassifier(nn.Module):
             )
             self.base_model = get_peft_model(self.base_model, peft_config)
         else:
-            # If full finetuning, enable gradient checkpointing to save VRAM
             self.base_model.gradient_checkpointing_enable()
 
         self.pooler = AttentionHead(self.hidden_size)
         
-        # --- Normalization Layers (CRITICAL for Multi-modal fusion) ---
         self.norm_semantic = nn.LayerNorm(self.hidden_size)
         self.norm_style = nn.LayerNorm(self.style_feat_dim)
         
-        # --- Heads ---
         self.classifier = nn.Sequential(
             nn.Linear(self.hidden_size + self.style_feat_dim, self.hidden_size),
             nn.Mish(),
@@ -154,15 +144,13 @@ class CodeClassifier(nn.Module):
             nn.Linear(self.hidden_size, 128)
         )
 
-        # Init custom layers
         self._init_weights(self.classifier)
         self._init_weights(self.language_classifier)
         self._init_weights(self.projection_head)
 
-        # --- Loss Setup ---
         loss_cfg = config.get("loss_weights", {})
         self.loss_fn = FocalLoss(
-            alpha=class_weights, # Passed from main
+            alpha=class_weights,
             gamma=loss_cfg.get("focal_gamma", 2.0),
             smoothing=config["training"].get("label_smoothing", 0.1)
         )
@@ -188,60 +176,46 @@ class CodeClassifier(nn.Module):
                 nn.init.constant_(m.weight, 1.0)
 
     def forward(self, input_ids, attention_mask, style_feats=None, lang_ids=None, labels=None, alpha=1.0):
-        # 1. Base Model
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
         last_hidden_state = outputs.last_hidden_state
         
-        # 2. Pooling & Normalization
         semantic_features = self.pooler(last_hidden_state, attention_mask)
         semantic_features = self.norm_semantic(semantic_features)
 
-        # 3. Style Features Handling
         if style_feats is not None:
-            # FP16 SAFETY: Ensure style feats match the model's dtype (float16 if amp used)
             style_feats = style_feats.to(dtype=semantic_features.dtype, device=semantic_features.device)
             style_feats = self.norm_style(style_feats)
             combined_features = torch.cat((semantic_features, style_feats), dim=1)
         else:
-            # Fallback dummy style (should not happen with correct dataloader)
             dummy = torch.zeros((semantic_features.size(0), self.style_feat_dim), 
                               dtype=semantic_features.dtype, device=semantic_features.device)
             combined_features = torch.cat((semantic_features, dummy), dim=1)
 
-        # 4. Main Classification
         task_logits = self.classifier(combined_features)
         
         loss = None
         if labels is not None:
-            # A. Task Loss (Focal)
             loss_task = self.loss_fn(task_logits, labels)
             
-            # B. Contrastive Loss (Supervised Contrastive Learning)
             loss_scl = 0.0
             if self.supcon_loss is not None:
-                # Projection for contrastive loss (only on semantic part usually better)
                 proj = F.normalize(self.projection_head(semantic_features), p=2, dim=1)
                 loss_scl = self.supcon_loss(proj, labels)
             
-            # C. Domain Adaptation Loss (DANN)
             loss_dann = 0.0
             if lang_ids is not None and alpha > 0:
-                # Reverse gradients just for the language classifier
                 reversed_feats = GradientReversalFn.apply(semantic_features, alpha)
                 lang_logits = self.language_classifier(reversed_feats)
                 loss_dann = self.dann_loss(lang_logits, lang_ids)
             
-            # Total Loss
             loss = loss_task + (self.contrastive_weight * loss_scl) + (self.dann_weight * loss_dann)
             
         return task_logits, loss
 
     def compute_metrics(self, preds, labels):
-        # Utilities for robust metric calculation
         preds = np.array(preds)
         labels = np.array(labels)
         
-        # Handle if preds are logits or class indices
         if preds.ndim > 1: 
             preds = np.argmax(preds, axis=1)
         

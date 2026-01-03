@@ -97,21 +97,26 @@ def evaluate_model(model, dataloader, device, label_names=None):
             if extra_features is not None:
                 extra_features = extra_features.to(device)
             
-            logits, loss = model(
+            outputs = model(
                 input_ids, 
                 attention_mask, 
                 extra_features=extra_features,
-                labels=labels, 
-                alpha=0.0
+                labels=labels
             )
+            
+            if len(outputs) == 3:
+                logits, loss, _ = outputs
+            else:
+                logits, loss = outputs
             
             loss_accum += loss.item()
             preds = torch.argmax(logits, dim=1).cpu().numpy()
             all_preds.extend(preds)
             all_labels.extend(labels.cpu().numpy())
 
+    final_loss = loss_accum / len(dataloader)
     metrics = {
-        "loss": loss_accum / len(dataloader),
+        "loss": final_loss,
         "accuracy": accuracy_score(all_labels, all_preds),
         "f1_macro": f1_score(all_labels, all_preds, average="macro"),
         "f1_weighted": f1_score(all_labels, all_preds, average="weighted")
@@ -120,7 +125,8 @@ def evaluate_model(model, dataloader, device, label_names=None):
     report = ""
     if label_names:
         try:
-            report = classification_report(all_labels, all_preds, target_names=label_names, digits=4)
+            unique_labels = sorted(list(set(all_labels) | set(all_preds)))
+            report = classification_report(all_labels, all_preds, target_names=label_names, digits=4, zero_division=0)
         except Exception as e:
             logger.warning(f"Classification Report Warning: {e}")
             
