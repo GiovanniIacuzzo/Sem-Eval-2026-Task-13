@@ -5,8 +5,9 @@ data:
   train_path: "data/Task_C/train.parquet"
   val_path: "data/Task_C/validation.parquet"  
   max_length: 512
-  balance_languages: True
-  samples_per_lang: 4000 
+  max_training_samples: 200000 
+  balance_languages: false
+  max_code_chars: 15000
 
 # ---------------------
 # Model Architecture
@@ -14,20 +15,11 @@ data:
 model:
   model_name: "microsoft/graphcodebert-base"
   num_labels: 4 
-  use_lora: true   
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
   extra_dropout: 0.2 
-  languages:
-    - python
-    - java
-    - c++
-    - c
-    - c#
-    - javascript
-    - typescript
-    - go
-    - php
-    - ruby
-    - rust
+  num_languages: 12
 
 # ---------------------
 # Training Hyperparameters
@@ -36,15 +28,23 @@ training:
   output_dir: "./results/results_TaskC"
   checkpoint_dir: "./results/results_TaskC/checkpoints"
   log_dir: "./results/results_TaskC/logs"
-  num_epochs: 10
-  early_stop_patience: 4 
-  batch_size: 64
+  num_epochs: 8
+  early_stop_patience: 3 
+  batch_size: 48
   gradient_accumulation_steps: 2
-  learning_rate: 0.0002
+  learning_rate: 0.0003
   evaluation_metric: "f1" 
   warmup_ratio: 0.1
   fp16: true
-  label_smoothing: 0.0
+  label_smoothing: 0.05
+
+# ---------------------
+# Loss Weights
+# ---------------------
+loss_weights:
+  contrastive: 0.2
+  dann: 0.05
+  focal_gamma: 2.0
 
 # ---------------------
 # Demo Mode

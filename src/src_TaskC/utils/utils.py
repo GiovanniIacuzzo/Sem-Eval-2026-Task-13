@@ -72,13 +72,15 @@ def evaluate(
         for batch in progress_bar:
             input_ids      = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            style_feats    = batch["style_feats"].to(device, non_blocking=True)
             labels         = batch["labels"].to(device, non_blocking=True)
             lang_ids       = batch["lang_ids"].to(device, non_blocking=True)
             
             with autocast(device_type=device_type, dtype=dtype):
-                logits, loss = model.forward(
+                logits, loss = model(
                     input_ids, 
                     attention_mask, 
+                    style_feats=style_feats,
                     lang_ids=lang_ids,
                     labels=labels, 
                     alpha=0.0 
@@ -92,12 +94,18 @@ def evaluate(
             predictions.extend(preds.detach().cpu().numpy())
             references.extend(labels.detach().cpu().numpy())
             
-            del input_ids, attention_mask, labels, lang_ids, logits, loss
+            del input_ids, attention_mask, style_feats, labels, lang_ids, logits, loss
 
-    eval_metrics = compute_metrics(predictions, references)
+    if hasattr(model, 'compute_metrics'):
+        eval_metrics = model.compute_metrics(predictions, references)
+    else:
+        from src.src_TaskC.models.model import compute_metrics
+        eval_metrics = compute_metrics(predictions, references)
+        
     eval_metrics["loss"] = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
     
     if verbose:
+        from sklearn.metrics import classification_report
         report = classification_report(
             references, predictions, 
             zero_division=0,

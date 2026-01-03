@@ -1,33 +1,31 @@
 import os
 import sys
 import logging
-logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 import yaml
 import torch
 import numpy as np
 import argparse
-import gc
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 from dotenv import load_dotenv
-from sklearn.model_selection import StratifiedKFold
 from transformers import AutoTokenizer
 from comet_ml import Experiment
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+
 from src.src_TaskC.models.model import CodeClassifier
-from src.src_TaskC.dataset.dataset import CodeDataset, load_data_for_kfold, get_dynamic_language_map, get_class_weights
+from src.src_TaskC.dataset.dataset import CodeDataset, load_data_for_training, get_dynamic_language_map, get_class_weights
 from src.src_TaskC.utils.utils import evaluate
 
 # -----------------------------------------------------------------------------
-# Configuration & Setup
+# Logger & UX Setup
 # -----------------------------------------------------------------------------
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%H:%M:%S",
+    datefmt=" %H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
@@ -62,13 +60,13 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
     predictions, references = [], []
     
     optimizer.zero_grad()
-    
     len_dataloader = len(dataloader)
     progress_bar = tqdm(dataloader, desc=f"Ep {epoch_idx+1} Train", leave=False, dynamic_ncols=True)
     
     for step, batch in enumerate(progress_bar):
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+        style_feats = batch["style_feats"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
         lang_ids = batch["lang_ids"].to(device, non_blocking=True)
         
@@ -80,6 +78,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         with autocast(device_type='cuda', dtype=torch.float16):
             logits, loss = model(
                 input_ids, attention_mask, 
+                style_feats=style_feats,
                 lang_ids=lang_ids, labels=labels, alpha=alpha
             )
             loss = loss / accumulation_steps
@@ -104,11 +103,8 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         })
 
         preds = torch.argmax(logits, dim=1).detach().cpu().numpy()
-        labels_cpu = labels.detach().cpu().numpy()
         predictions.extend(preds)
-        references.extend(labels_cpu)
-        
-        del input_ids, attention_mask, labels, lang_ids, logits, loss
+        references.extend(labels.detach().cpu().numpy())
     
     metrics = model.compute_metrics(predictions, references)
     metrics["loss"] = running_loss / len_dataloader
@@ -119,57 +115,49 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
-    ConsoleUX.print_banner("SemEval 2026 - Task 13 - subtask C")
+    ConsoleUX.print_banner("SemEval 2026 - Task 13 - Subtask C (Optimized)")
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="src/src_TaskC/config/config.yaml") 
-    parser.add_argument("--k_folds", type=int, default=5, help="Number of CV folds")
     args = parser.parse_args()
 
-    # --- 1. DATA PATH SETUP ---
-    DATA_ROOT = os.getenv("DATA_PATH", "./data")
-    task_data_dir = os.path.join(DATA_ROOT, "Task_C")
-    
-    train_file = os.path.join(task_data_dir, "train.parquet")
-    val_file = os.path.join(task_data_dir, "validation.parquet")
-
-    if not os.path.exists(train_file):
-        logger.error(f"DATA NOT FOUND! Expected 'train.parquet' in: {task_data_dir}")
-        logger.error("Please ensure you have downloaded the data into the './data/Task_C/' folder.")
-        sys.exit(1)
-    
-    logger.info(f"Data Source: {task_data_dir}")
-    
-    config_path = args.config
-    if not os.path.exists(config_path):
-        logger.error(f"Config not found at {config_path}")
-        sys.exit(1)
-
-    with open(config_path, "r") as f:
+    # --- 1. SETUP CONFIG & DEVICE ---
+    with open(args.config, "r") as f:
         config = yaml.safe_load(f)
-
-    config["data"]["train_path"] = train_file
-    config["data"]["val_path"] = val_file
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
     # =========================================================================
-    # 2. SETUP DATA
+    # 2. SMART DATA LOADING
     # =========================================================================
-    full_df = load_data_for_kfold(config)
+    full_df = load_data_for_training(config)
+    
+    train_df = full_df.sample(frac=0.85, random_state=42)
+    val_df = full_df.drop(train_df.index)
     
     language_map = get_dynamic_language_map(full_df)
     config["model"]["num_languages"] = len(language_map)
     
-    model_name = config["model"]["model_name"]
-    logger.info(f"Loading Tokenizer: {model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(config["model"]["model_name"])
+    class_weights = get_class_weights(train_df, device)
+    
+    train_dataset = CodeDataset(train_df, tokenizer, language_map, config["data"]["max_length"], augment=True)
+    val_dataset = CodeDataset(val_df, tokenizer, language_map, config["data"]["max_length"], augment=False)
 
-    y_all = full_df['label'].values
-    
-    kf = StratifiedKFold(n_splits=args.k_folds, shuffle=True, random_state=42)
-    
+    train_dl = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], 
+                         shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
+    val_dl = DataLoader(val_dataset, batch_size=config["training"]["batch_size"], 
+                       shuffle=False, num_workers=4, pin_memory=True)
+
+    logger.info(f"Final Train size: {len(train_dataset)} | Val size: {len(val_dataset)}")
+
+    # =========================================================================
+    # 3. MODEL & EXPERIMENT SETUP
+    # =========================================================================
+    model = CodeClassifier(config, class_weights=class_weights)
+    model.to(device)
+
     experiment = Experiment(
         api_key=os.getenv("COMET_API_KEY"),
         project_name=os.getenv("COMET_PROJECT_NAME", "semeval-task13-subtaskc"),
@@ -178,108 +166,56 @@ if __name__ == "__main__":
     )
     experiment.log_parameters(config)
 
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["training"]["learning_rate"]), weight_decay=0.01)
+    scaler = GradScaler()
+    
+    acc_steps = config["training"].get("gradient_accumulation_steps", 1)
+    num_epochs = config["training"].get("num_epochs", 5) 
+    total_steps = len(train_dl) * num_epochs // acc_steps
+    
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=float(config["training"]["learning_rate"]),
+        total_steps=total_steps, pct_start=0.1
+    )
+
     # =========================================================================
-    # 3. K-FOLD LOOP
+    # 4. TRAINING LOOP
     # =========================================================================
-    for fold, (train_idx, val_idx) in enumerate(kf.split(np.zeros(len(y_all)), y_all)):
-        ConsoleUX.print_banner(f"FOLD {fold+1}/{args.k_folds}")
-        
-        train_df_fold = full_df.iloc[train_idx]
-        val_df_fold = full_df.iloc[val_idx]
-        
-        class_weights = get_class_weights(train_df_fold, device)
-        
-        logger.info(f"Creating Datasets for Fold {fold+1}...")
-        train_dataset = CodeDataset(
-            dataframe=train_df_fold, 
-            tokenizer=tokenizer, 
-            language_map=language_map,
-            max_length=config["data"]["max_length"], 
-            augment=True
+    best_f1 = 0.0
+    patience = config["training"].get("early_stop_patience", 4)
+    patience_counter = 0
+    checkpoint_dir = config["training"]["checkpoint_dir"]
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    for epoch in range(num_epochs):
+        train_metrics = train_one_epoch(
+            model, train_dl, optimizer, scheduler, scaler, device, 
+            epoch, num_epochs, acc_steps
         )
-        val_dataset = CodeDataset(
-            dataframe=val_df_fold, 
-            tokenizer=tokenizer, 
-            language_map=language_map,
-            max_length=config["data"]["max_length"], 
-            augment=False
-        )
-        logger.info(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
-
-        model = CodeClassifier(config, class_weights=class_weights)
         
-        if model.num_languages != len(language_map):
-            logger.info(f"Adjusting DANN head to {len(language_map)} languages.")
-            import torch.nn as nn
-            model.language_classifier = nn.Sequential(
-                nn.Linear(model.hidden_size, model.hidden_size // 2),
-                nn.ReLU(),
-                nn.Linear(model.hidden_size // 2, len(language_map))
-            )
-            model._init_weights(model.language_classifier)
-            
-        model.to(device)
+        val_metrics, _, _ = evaluate(model, val_dl, device, verbose=False)
         
-        num_workers = 4
-        train_dl = DataLoader(train_dataset, batch_size=config["training"]["batch_size"], 
-                             shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True)
-        val_dl = DataLoader(val_dataset, batch_size=config["training"]["batch_size"], 
-                           shuffle=False, num_workers=num_workers, pin_memory=True)
+        ConsoleUX.log_metrics(f"Ep{epoch+1}", val_metrics)
+        experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
+        experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
 
-        optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["training"]["learning_rate"]), weight_decay=0.01)
-        scaler = GradScaler()
-        
-        acc_steps = config["training"].get("gradient_accumulation_steps", 1)
-        num_epochs = config["training"].get("num_epochs", 5) 
-        total_steps = len(train_dl) * num_epochs // acc_steps
-        
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=float(config["training"]["learning_rate"]),
-            total_steps=total_steps, pct_start=0.1
-        )
-
-        best_fold_f1 = 0.0
-        patience = config["training"].get("early_stop_patience", 3)
-        patience_counter = 0
-        save_dir = config["training"]["checkpoint_dir"]
-        os.makedirs(save_dir, exist_ok=True)
-
-        for epoch in range(num_epochs):
-            train_metrics = train_one_epoch(
-                model, train_dl, optimizer, scheduler, scaler, device, 
-                epoch, num_epochs, acc_steps
-            )
+        if val_metrics["f1"] > best_f1:
+            logger.info(f"New Best F1: {val_metrics['f1']:.4f}")
+            best_f1 = val_metrics["f1"]
+            patience_counter = 0
             
-            val_metrics, val_preds, val_refs = evaluate(model, val_dl, device, verbose=False)
-            
-            ConsoleUX.log_metrics(f"F{fold+1}-Ep{epoch+1}", val_metrics)
-            
-            experiment.log_metrics(train_metrics, prefix=f"Fold{fold}_Train", step=epoch)
-            experiment.log_metrics(val_metrics, prefix=f"Fold{fold}_Val", step=epoch)
-
-            if val_metrics["f1"] > best_fold_f1:
-                logger.info(f"New Best F1 for Fold {fold+1}: {val_metrics['f1']:.4f}")
-                best_fold_f1 = val_metrics["f1"]
-                patience_counter = 0
-                
-                fold_save_dir = os.path.join(save_dir, f"fold_{fold}")
-                os.makedirs(fold_save_dir, exist_ok=True)
-                
-                if model.use_lora:
-                    model.base_model.save_pretrained(fold_save_dir)
-                    torch.save(model.classifier.state_dict(), os.path.join(fold_save_dir, "head.pt"))
-                else:
-                    torch.save(model.state_dict(), os.path.join(fold_save_dir, "model.pt"))
+            save_path = os.path.join(checkpoint_dir, "best_model.pt")
+            if model.use_lora:
+                model.base_model.save_pretrained(checkpoint_dir)
+                torch.save(model.classifier.state_dict(), os.path.join(checkpoint_dir, "head.pt"))
             else:
-                patience_counter += 1
-            
-            if patience_counter >= patience:
-                logger.info(f"Early stopping fold {fold+1}")
-                break
-
-        del model, optimizer, scheduler, scaler, train_dl, val_dl, train_dataset, val_dataset
-        torch.cuda.empty_cache()
-        gc.collect()
+                torch.save(model.state_dict(), save_path)
+        else:
+            patience_counter += 1
+        
+        if patience_counter >= patience:
+            logger.info("Early stopping triggered.")
+            break
 
     experiment.end()
-    logger.info("Training Finished. All folds processed.")
+    logger.info("Training Finished.")
