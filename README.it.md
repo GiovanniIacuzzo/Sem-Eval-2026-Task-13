@@ -18,9 +18,9 @@ Il progetto è diviso in tre moduli principali, ognuno con obiettivi e architett
 
 | Task | Nome | Obiettivo | Tipo di Problema |
 | :--- | :--- | :--- | :--- |
-| **[Subtask A](src/src_TaskA/README.md)** | **Machine-Generated Code Detection** | Distinguere se un codice è scritto da un Umano o da una Macchina. | *Binary Classification* |
-| **[Subtask B](src/src_TaskB/README.md)** | **Multi-Class Authorship Detection** | Identificare lo specifico modello autore (es. GPT-4, Llama-3). | *Multi-class Classification* |
-| **[Subtask C](src/src_TaskC/README.md)** | **Mixed-Source Analysis** | Analizzare modifiche, refactoring e codice ibrido Umano/AI. | *Regression / Hybrid* |
+| **[Subtask A](src/src_TaskA/README.it.md)** | **Machine-Generated Code Detection** | Distinguere se un codice è scritto da un Umano o da una Macchina. | *Binary Classification* |
+| **[Subtask B](src/src_TaskB/README.it.md)** | **Multi-Class Authorship Detection** | Identificare lo specifico modello autore (es. GPT-4, Llama-3). | *Multi-class Classification* |
+| **[Subtask C](src/src_TaskC/README.it.md)** | **Mixed-Source Analysis** | Analizzare modifiche, refactoring e codice ibrido Umano/AI. | *Regression / Hybrid* |
 
 ---
 
