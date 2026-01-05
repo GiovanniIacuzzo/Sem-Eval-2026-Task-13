@@ -1,35 +1,41 @@
 # SemEval-2026 Task 13: Subtask C - Mixed-Source & Code Modification Analysis
 
-## 📌 Obiettivo del Subtask C
+## 📌 Subtask C Objective
 
-Il **Subtask C** introduce il livello più alto di complessità: l'analisi di codice **ibrido** o **modificato**. Non ci chiediamo più solo "chi l'ha scritto", ma analizziamo le sfumature di collaborazione tra Umano e Macchina (es. codice umano refactorizzato da AI, o codice AI corretto da umani).
+<div align="center">
+  <a href="README.it.md">
+    <img src="https://img.shields.io/badge/Lingua-Italiano-008C45?style=for-the-badge&logo=italian&logoColor=white" alt="Leggi in Italiano">
+  </a>
+</div>
 
-- **Input:** Snippet di codice (con potenziali differenze/diff o versioni multiple).
-- **Target:** Classificazione Ibrida o Regressione (es. identificare se il codice è stato modificato da una AI o assegnare un punteggio di "artificialità").
-- **Sfida principale:** Rilevare pattern sottili di modifica che non alterano la logica del codice ma ne cambiano lo stile (Refactoring, Obfuscation, Translation).
+**Subtask C** introduces the highest level of complexity: the analysis of **hybrid** or **modified** code. We no longer ask just "who wrote it," but analyze the nuances of collaboration between Human and Machine (e.g., human code refactored by AI, or AI code fixed by humans).
 
-| Setting | Tipo di Analisi | Obiettivo |
+- **Input:** Code snippets (with potential differences/diffs or multiple versions).
+- **Target:** Hybrid Classification or Regression (e.g., identifying if code was modified by an AI or assigning an "artificiality" score).
+- **Key Challenge:** Detecting subtle modification patterns that do not alter the code logic but change its style (Refactoring, Obfuscation, Translation).
+
+| Setting | Analysis Type | Objective |
 | :--- | :--- | :--- |
-| **Mixed Sources** | Human + AI | Rilevare confini o percentuali di contributo AI |
-| **Refactoring** | Original vs Modified | Capire se lo stile è stato alterato da un modello |
-| **Soft-Labeling** | Score 0.0 - 1.0 | Assegnare un grado di certezza sull'origine |
+| **Mixed Sources** | Human + AI | Detect boundaries or AI contribution percentages |
+| **Refactoring** | Original vs Modified | Understand if the style was altered by a model |
+| **Soft-Labeling** | Score 0.0 - 1.0 | Assign a degree of certainty regarding the origin |
 
 ---
 
-## 📝 Analisi iniziale del dataset
+## 📝 Initial Dataset Analysis
 
-Per affrontare la natura eterogenea di questo task, lo script `info_dataset_subTaskC.py` è stato progettato per adattarsi dinamicamente al tipo di target (categorico o numerico):
+To address the heterogeneous nature of this task, the `info_dataset_subTaskC.py` script was designed to dynamically adapt to the target type (categorical or numerical):
 
-1.  Rileva automaticamente se il target è una **Classe** (Grafici a barre) o uno **Score** (Istogrammi/KDE).
-2.  Analizza la lunghezza del codice gestendo gli outlier (taglio al 95° percentile).
-3.  Esamina la distribuzione dei linguaggi per capire se il task di modifica è specifico per linguaggio o agnostico.
+1.  Automatically detects if the target is a **Class** (Bar charts) or a **Score** (Histograms/KDE).
+2.  Analyzes code length while handling outliers (95th percentile cut-off).
+3.  Examines language distribution to understand if the modification task is language-specific or agnostic.
 
 ---
 
-### Esempi di risultati salvati in `img_TaskC`:
+### Examples of results saved in `img_TaskC`:
 
-**1. Distribuzione del Target (Label o Score)**
-A differenza dei task precedenti, qui potremmo osservare distribuzioni continue (score di regressione) o classi ibride. Questo grafico è cruciale per scegliere la Loss Function (CrossEntropy vs MSE).
+**1. Target Distribution (Label or Score)**
+Unlike previous tasks, here we might observe continuous distributions (regression scores) or hybrid classes. This chart is crucial for choosing the Loss Function (CrossEntropy vs MSE).
 
 <div style="text-align:center">
   <img src="../../img/img_TaskC/Train_target_dist.png" width="45%" alt="Train Target Distribution"/>
@@ -39,8 +45,8 @@ A differenza dei task precedenti, qui potremmo osservare distribuzioni continue 
 
 <br>
 
-**2. Distribuzione Lunghezza Codice (Cleaned)**
-Analisi della lunghezza degli snippet (senza outlier estremi). In task di "Mixed-Source", la lunghezza può correlare con la probabilità di intervento dell'AI (le AI tendono a refactorizzare in modo conciso o verboso a seconda del prompt).
+**2. Code Length Distribution (Cleaned)**
+Analysis of snippet lengths (excluding extreme outliers). In "Mixed-Source" tasks, length can correlate with the likelihood of AI intervention (AIs tend to refactor concisely or verbosely depending on the prompt).
 
 <div style="text-align:center">
   <img src="../../img/img_TaskC/Train_length_dist.png" width="45%" alt="Train Length Distribution"/>
@@ -50,8 +56,8 @@ Analisi della lunghezza degli snippet (senza outlier estremi). In task di "Mixed
 
 <br>
 
-**3. Linguaggi Predominanti**
-Panoramica dei linguaggi coinvolti nel task di modifica/generazione ibrida.
+**3. Predominant Languages**
+Overview of the languages involved in the hybrid modification/generation task.
 
 <div style="text-align:center">
   <img src="../../img/img_TaskC/Train_languages.png" width="45%" alt="Train Languages"/>
@@ -59,37 +65,37 @@ Panoramica dei linguaggi coinvolti nel task di modifica/generazione ibrida.
   <img src="../../img/img_TaskC/Test_Sample_languages.png" width="45%" alt="Test Languages"/>
 </div>
 
-Queste informazioni aiutano a definire:
+This information helps to define:
 
-- Se trattare il problema come **Classificazione** o **Regressione**.
-- Come gestire la **lunghezza del contesto** nei modelli Transformer (es. snippet molto lunghi potrebbero richiedere sliding windows).
-- La strategia di **Data Augmentation** necessaria per coprire linguaggi meno rappresentati.
+- Whether to treat the problem as **Classification** or **Regression**.
+- How to manage **context length** in Transformer models (e.g., very long snippets might require sliding windows).
+- The **Data Augmentation** strategy needed to cover less represented languages.
 
 ---
 
 
-## 🚀 Istruzioni per l'Esecuzione
+## 🚀 Execution Instructions
 
-### 1. Addestramento
+### 1. Training
 
-Per avviare la training pipeline con logging su console, TensorBoard e CometML:
+To start the training pipeline with logging to console, TensorBoard, and CometML:
 ```bash
 python -m src.src_TaskC.train
 ```
 
-L'output includerà una progress bar con metriche in tempo reale. Il miglior modello (basato su Macro-F1) verrà salvato automaticamente in `results/results_TaskC/checkpoints/`.
+The output will include a progress bar with real-time metrics. The best model (based on Macro-F1) will be automatically saved in `results/results_TaskC/checkpoints/`.
 
-### 2. Inferenza e Sottomissione
+### 2. Inference and Submission
 
-Per generare il file `submission_task_c.csv` valido per la leaderboard:
+Per generare il file `submission_task_c.csv` file for the leaderboard:
 ```bash
 python -m src.src_TaskC.generate_submission
 ```
-Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle sottocartelle di download Kaggle) e genera il file in `results/results_TaskC/submission/submission_task_c.csv`.
+The script automatically detects the `test.parquet` file (searching also within Kaggle download subfolders) and generates the file in `results/results_TaskC/submission/submission_task_c.csv`.
 
 ---
 
-## 📊 Struttura del Progetto Sub Task-C
+## 📊 Repository Structure Sub Task-C
 
 ```bash
 ├── 📁 src
@@ -126,18 +132,21 @@ Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle 
 <!--                   AUTORE                     -->
 <!--───────────────────────────────────────────────-->
 
-<h2 align="center">✨ Autore ✨</h2>
+<div align="center">
+  <h2>✨ Autore ✨</h2>
 
-<p align="center">
-  <strong>Giovanni Giuseppe Iacuzzo</strong><br>
-  <em>Studente di Ingegneria Dell'IA e della CyberSecurity · Università degli Studi Kore di Enna</em>
-</p>
+  <p>
+    <strong>Giovanni Giuseppe Iacuzzo</strong><br>
+    <em>AI & Cybersecurity Engineering Student</em><br>
+    <em>University of Kore, Enna</em>
+  </p>
 
-<p align="center">
-  <a href="https://github.com/giovanniIacuzzo" target="_blank">
-    <img src="https://img.shields.io/badge/GitHub-%40giovanniIacuzzo-181717?style=for-the-badge&logo=github" alt="GitHub"/>
-  </a>
-  <a href="mailto:giovanni.iacuzzo@unikorestudent.com">
-    <img src="https://img.shields.io/badge/Email-Contattami-blue?style=for-the-badge&logo=gmail" alt="Email"/>
-  </a>
-</p>
+  <p>
+    <a href="https://github.com/giovanniIacuzzo" target="_blank">
+      <img src="https://img.shields.io/badge/GitHub-GiovanniIacuzzo-181717?style=for-the-badge&logo=github" alt="GitHub"/>
+    </a>
+    <a href="mailto:giovanni.iacuzzo@unikorestudent.com">
+      <img src="https://img.shields.io/badge/Email-Contattami-D14836?style=for-the-badge&logo=gmail&logoColor=white" alt="Email"/>
+    </a>
+  </p>
+</div>
