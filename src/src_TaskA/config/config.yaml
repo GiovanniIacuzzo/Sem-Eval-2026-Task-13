@@ -2,13 +2,16 @@ common:
   data_dir: "data/Task_A"
   checkpoint_dir: "results/results_TaskA/checkpoints"
   
+  use_flash_attention: true
+  gradient_checkpointing: false
+  
   model_name: "bigcode/starcoder2-3b"
   num_labels: 2 
   
-  max_length: 1024
-  num_epochs: 4
-  batch_size: 4
-  gradient_accumulation_steps: 8
+  max_length: 512
+  num_epochs: 6
+  batch_size: 32
+  gradient_accumulation_steps: 2
   learning_rate: 2.0e-4
   early_stop_patience: 3
   
@@ -19,4 +22,5 @@ common:
   lora_r: 32
   lora_alpha: 64
   lora_dropout: 0.05
+
   lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
