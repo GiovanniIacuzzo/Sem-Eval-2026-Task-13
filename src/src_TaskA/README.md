@@ -2,7 +2,7 @@
 ## 📌 Subtask A Objective
 
 <div align="center">
-  <a href="src/src_TaskA/README.it.md">
+  <a href="README.it.md">
     <img src="https://img.shields.io/badge/Lingua-Italiano-008C45?style=for-the-badge&logo=italian&logoColor=white" alt="Leggi in Italiano">
   </a>
 </div>

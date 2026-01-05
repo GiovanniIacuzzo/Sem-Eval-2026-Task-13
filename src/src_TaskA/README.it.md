@@ -2,7 +2,7 @@
 ## 📌 Obiettivo del Subtask A
 
 <div align="center">
-  <a href="src/src_TaskA/README.md">
+  <a href="README.md">
     <img src="https://img.shields.io/badge/Language-English-005BBB?style=for-the-badge&logo=english&logoColor=white" alt="Read in English">
   </a>
 </div>
