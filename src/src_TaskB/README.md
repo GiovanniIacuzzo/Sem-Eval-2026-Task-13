@@ -1,38 +1,44 @@
 # SemEval-2026 Task 13: Subtask B - Multi-Class Authorship Detection
 
-## 📌 Obiettivo del Subtask B
+## 📌 Subtask B Objective
 
-A differenza del Subtask A (binario), il **Subtask B** affronta una sfida di **Fine-Grained Classification**. L'obiettivo è identificare **quale specifico autore** (umano o modello AI) ha generato un determinato snippet di codice.
+<div align="center">
+  <a href="README.it.md">
+    <img src="https://img.shields.io/badge/Lingua-Italiano-008C45?style=for-the-badge&logo=italian&logoColor=white" alt="Leggi in Italiano">
+  </a>
+</div>
 
-- **Etichette:** 31+ classi (es. `human`, `gpt-4o`, `llama-3.1-8b`, `starcoder`, ecc.)
-- **Input:** Snippet di codice sorgente multilingua
-- **Sfida principale:** Il dataset presenta un forte sbilanciamento e include scenari **OOD (Out-Of-Distribution)**.
+Unlike Subtask A (binary), **Subtask B** addresses a **Fine-Grained Classification** challenge. The goal is to identify **which specific author** (human or AI model) generated a given code snippet.
 
-Il modello deve non solo distinguere tra i generatori noti, ma gestire in modo robusto la presenza di modelli mai visti durante il training nel set di test.
+- **Labels:** 31+ classes (e.g., `human`, `gpt-4o`, `llama-3.1-8b`, `starcoder`, etc.)
+- **Input:** Multilingual source code snippets
+- **Key Challenge:** The dataset exhibits strong imbalance and includes **OOD (Out-Of-Distribution)** scenarios.
 
-| Setting | Generatori | Obiettivo |
+The model must not only distinguish between known generators but also robustly handle the presence of models never seen during training in the test set.
+
+| Setting | Generators | Objective |
 | :--- | :--- | :--- |
-| **In-Distribution (ID)** | Presenti nel Train | Classificare correttamente l'autore esatto |
-| **Out-Of-Distribution (OOD)** | Assenti nel Train | Generalizzazione o Rilevamento OOD |
-| **Class Imbalance** | Human >>> AI Models | Gestire la predominanza della classe `human` |
+| **In-Distribution (ID)** | Present in Train | Correctly classify the exact author |
+| **Out-Of-Distribution (OOD)** | Absent in Train | Generalization or OOD Detection |
+| **Class Imbalance** | Human >>> AI Models | Handle the dominance of the `human` class |
 
 ---
 
-## 📝 Analisi iniziale del dataset
+## 📝 Initial Dataset Analysis
 
-Per analizzare la complessità del task multiclasse, è stato sviluppato lo script `info_dataset_subTaskB.py` che:
+To analyze the complexity of this multi-class task, the `info_dataset_subTaskB.py` script was developed to:
 
-1.  Carica i dataset (Train, Validation, Test) e normalizza le etichette dei generatori.
-2.  Effettua un controllo sui **duplicati** per evitare *data leakage* tra i set.
-3.  Genera metriche avanzate come la **lunghezza in token** (approssimata) e la correlazione **Linguaggio-Generatore**.
-4.  Produce il dizionario `GENERATOR_MAP` necessario per la fase di training.
+1.  Load datasets (Train, Validation, Test) and normalize generator labels.
+2.  Perform a check for **duplicates** to avoid *data leakage* between sets.
+3.  Generate advanced metrics such as (approximate) **token length** and **Language-Generator** correlation.
+4.  Produce the `GENERATOR_MAP` dictionary required for the training phase.
 
 ---
 
-### Esempi di risultati salvati in `img_TaskB`:
+### Examples of results saved in `img_TaskB`:
 
-**1. Distribuzione delle Classi (Train vs Validation)**
-Evidenzia il forte sbilanciamento verso la classe *Human* e le differenze di frequenza tra i vari modelli AI.
+**1. Class Distribution (Train vs Validation)**
+Highlights the strong imbalance towards the *Human* class and frequency differences among the various AI models.
 
 <div style="text-align:center">
   <img src="../../img/img_TaskB/Train_class_dist.png" width="45%" alt="Train Class Distribution"/>
@@ -42,8 +48,8 @@ Evidenzia il forte sbilanciamento verso la classe *Human* e le differenze di fre
 
 <br>
 
-**2. Verbosità dei Modelli (Lunghezza in Token)**
-Confronto della lunghezza media dei codici prodotti. I Boxplot (ordinati per mediana) mostrano come alcuni modelli (es. GPT-4o) tendano a essere più "prolissi" di altri.
+**2. Model Verbosity (Token Length)**
+Comparison of the average length of produced code. Boxplots (sorted by median) show how some models (e.g., GPT-4o) tend to be more "verbose" than others.
 
 <div style="text-align:center">
   <img src="../../img/img_TaskB/Train_token_boxplot.png" width="45%" alt="Train Token Boxplot"/>
@@ -53,8 +59,8 @@ Confronto della lunghezza media dei codici prodotti. I Boxplot (ordinati per med
 
 <br>
 
-**3. Heatmap Normalizzata (Generatore vs Linguaggio)**
-Mostra la probabilità condizionata che un certo generatore produca codice in un determinato linguaggio. Utile per identificare modelli specializzati (es. solo Python) rispetto a quelli generalisti.
+**3. Normalized Heatmap (Generator vs Language)**
+Shows the conditional probability that a certain generator produces code in a specific language. Useful for identifying specialized models (e.g., Python-only) versus generalist ones.
 
 <div style="text-align:center">
   <img src="../../img/img_TaskB/Train_heatmap_norm.png" width="45%" alt="Train Heatmap"/>
@@ -62,40 +68,41 @@ Mostra la probabilità condizionata che un certo generatore produca codice in un
   <img src="../../img/img_TaskB/Test_heatmap_norm.png" width="45%" alt="Test Heatmap"/>
 </div>
 
-Queste informazioni aiutano a capire:
+This information helps to understand:
 
-- La necessità di tecniche di **re-sampling** o **loss ponderata** dato lo sbilanciamento.
-- L'importanza della **lunghezza del codice** come feature discriminante.
-- La struttura delle correlazioni tra modelli e linguaggi di programmazione.
+- The need for **re-sampling** techniques or **weighted loss** given the imbalance.
+- The importance of **code length** as a discriminating feature.
+- The structure of correlations between models and programming languages.
 
 ---
 
-## 🚀 Istruzioni per l'Esecuzione
+## 🚀 Execution Instructions
 
-### 1. Addestramento
+### 1. Training
 
-Per avviare la training pipeline con logging su console, TensorBoard e CometML:
+To start the training pipeline with logging to console, TensorBoard, and CometML:
 ```bash
 python -m src.src_TaskB.train.binary
 ```
-Successivamente dopo aver fatto il train binario dovrai:
+
+Subsequently, once the binary training is complete, run:
 ```bash
 python -m src.src_TaskB.train.families
 ```
 
-L'output includerà una progress bar con metriche in tempo reale. Il miglior modello (basato su Macro-F1) verrà salvato automaticamente in `results/results_TaskB/checkpoints/`.
+The output will include a progress bar with real-time metrics. The best model (based on Macro-F1) will be automatically saved in `results/results_TaskB/checkpoints/`.
 
-### 2. Inferenza e Sottomissione
+### 2. Inference and Submission
 
-Per generare il file `submission_task_b.csv` valido per la leaderboard:
+To generate the valid `submission_task_b.csv` file for the leaderboard:
 ```bash
 python -m src.src_TaskB.generate_submission
 ```
-Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle sottocartelle di download Kaggle) e genera il file in `results/results_TaskB/submission/submission_task_b.csv`.
+The script automatically detects the `test.parquet` file (searching also within Kaggle download subfolders) and generates the file in `results/results_TaskB/submission/submission_task_b.csv`.
 
 ---
 
-## 📊 Struttura del Progetto Sub Task-B
+## 📊 Repository Structure Sub Task-B
 
 ```bash
 ├── 📁 src
