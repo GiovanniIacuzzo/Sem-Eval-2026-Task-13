@@ -11,48 +11,30 @@ OUTPUT_DIR = "data/Task_B_Processed"
 TRAIN_FILE = "train.parquet"
 VAL_FILE = "validation.parquet"
 
-FAMILY_GROUPS = {
-    # 01-ai
-    'yi': '01-ai',
-    
-    # BigCode
-    'starcoder': 'BigCode',
-    'santa': 'BigCode',
-    'bigcode': 'BigCode',
-    
-    # DeepSeek-AI
-    'deepseek': 'DeepSeek-AI',
-    
-    # Gemma
-    'gemma': 'Gemma',
-    
-    # IBM-Granite
-    'granite': 'IBM-Granite',
-    
-    # Meta-LLaMA
-    'llama': 'Meta-LLaMA',
-    
-    # Mistral
-    'mistral': 'Mistral',
-    'codestral': 'Mistral',
-    
-    # OpenAI
-    'openai': 'OpenAI',
-    'gpt': 'OpenAI',
-    
-    # Phi
-    'phi': 'Phi',
-    
-    # Qwen
-    'qwen': 'Qwen'
+FAMILY_MAPPING = {
+    'deepseek': 0, 'gemma': 1, 'gpt': 2, 'granite': 3, 'llama': 4, 
+    'mistral': 5, 'phi': 6, 'qwen': 7, 'starcoder': 8, 'yi': 9, 'other': 10
 }
 
 def get_family_name(generator_str):
-    """Estrae la famiglia dal nome del generatore."""
-    gen = str(generator_str).lower()
-    for key, family in FAMILY_GROUPS.items():
-        if key in gen:
-            return family
+    gen = str(generator_str).lower().strip()
+    
+    # --- FIX CRITICA: CATCH HUMAN ---
+    if 'human' in gen: return 'human' 
+    # --------------------------------
+    
+    # Ordine importante: controlliamo stringhe specifiche prima di quelle generiche
+    if 'granite' in gen or 'ibm' in gen: return 'granite'
+    if 'llama' in gen: return 'llama'
+    if 'gpt' in gen or 'openai' in gen: return 'gpt'
+    if 'mistral' in gen or 'codestral' in gen: return 'mistral'
+    if 'qwen' in gen: return 'qwen'
+    if 'phi' in gen: return 'phi'
+    if 'deepseek' in gen: return 'deepseek'
+    if 'gemma' in gen: return 'gemma'
+    if 'yi' in gen and 'yi-' in gen: return 'yi'
+    if 'starcoder' in gen or 'bigcode' in gen or 'santa' in gen: return 'starcoder'
+    
     return 'other'
 
 def clean_data(df):
@@ -69,48 +51,40 @@ def clean_data(df):
 
 def process_binary_dataset(df, is_train=True):
     df = df.copy()
+    # Usiamo la label originale del dataset (che è sicura) per il binary
     df['is_ai'] = df['label'].apply(lambda x: 0 if x == 0 else 1)
     return df[['code', 'is_ai', 'label', 'language', 'family', 'generator']]
 
 def process_families_dataset(df, mapping_file=None, is_train=True):
-    """
-    Crea il dataset mappando i generatori in MACRO-FAMIGLIE.
-    """
     df = df.copy()
-    df_ai = df[df['label'] > 0].copy()
     
-    if len(df_ai) == 0:
-        return pd.DataFrame()
-
-    if is_train:
-        unique_families = sorted(df_ai['family'].unique())
-        family_map = {fam: i for i, fam in enumerate(unique_families)}
+    if 'family' not in df.columns:
+        df['family'] = df['generator'].apply(get_family_name)
         
-        if mapping_file:
-            with open(mapping_file, 'w') as f:
-                json.dump(family_map, f, indent=4)
-            logger.info(f"Saved Global Family Mapping: {family_map}")
-    else:
-        if mapping_file and os.path.exists(mapping_file):
-            with open(mapping_file, 'r') as f:
-                family_map = json.load(f)
-        else:
-            unique_families = sorted(df_ai['family'].unique())
-            family_map = {fam: i for i, fam in enumerate(unique_families)}
-
-    df_ai['family_label'] = df_ai['family'].map(family_map).fillna(family_map.get('other', 0)).astype(int)
-
-    if is_train:
-        df_ai = df_ai.sample(frac=1, random_state=42).reset_index(drop=True)
-
-    return df_ai[['code', 'family_label', 'family', 'language', 'generator']]
+    # ORA QUESTO FUNZIONA CORRETTAMENTE
+    # Rimuove 'human' e lascia solo le AI
+    df_ai = df[df['family'] != 'human'].copy() 
+    
+    # Mapping: se qualcosa non è nel dizionario ma non è human, diventa 'other'
+    df_ai['family_norm'] = df_ai['family'].apply(lambda x: x if x in FAMILY_MAPPING else 'other')
+    df_ai['family_label'] = df_ai['family_norm'].map(FAMILY_MAPPING)
+    
+    logger.info(f"Original size: {len(df)} -> Filtered AI Only: {len(df_ai)}")
+    logger.info(f"Class counts:\n{df_ai['family_norm'].value_counts()}")
+    
+    return df_ai[['code', 'family_label', 'family_norm']]
 
 def prepare_datasets():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     mapping_path = os.path.join(OUTPUT_DIR, "family_mapping.json")
     
+    # Salva il mapping per riferimento futuro
+    with open(mapping_path, 'w') as f:
+        json.dump(FAMILY_MAPPING, f, indent=4)
+    
     train_path = os.path.join(DATA_DIR, TRAIN_FILE)
     if os.path.exists(train_path):
+        logger.info("Processing TRAIN...")
         df_train = clean_data(pd.read_parquet(train_path))
         
         df_bin_train = process_binary_dataset(df_train, is_train=True)
@@ -118,10 +92,10 @@ def prepare_datasets():
         
         df_fam_train = process_families_dataset(df_train, mapping_file=mapping_path, is_train=True)
         df_fam_train.to_parquet(os.path.join(OUTPUT_DIR, "train_families.parquet"))
-        logger.info(f"Train processed: {len(df_fam_train)} AI samples in families.")
 
     val_path = os.path.join(DATA_DIR, VAL_FILE)
     if os.path.exists(val_path):
+        logger.info("Processing VAL...")
         df_val = clean_data(pd.read_parquet(val_path))
         
         df_bin_val = process_binary_dataset(df_val, is_train=False)
@@ -129,7 +103,6 @@ def prepare_datasets():
         
         df_fam_val = process_families_dataset(df_val, mapping_file=mapping_path, is_train=False)
         df_fam_val.to_parquet(os.path.join(OUTPUT_DIR, "val_families.parquet"))
-        logger.info(f"Val processed: {len(df_fam_val)} AI samples.")
 
 if __name__ == "__main__":
     prepare_datasets()

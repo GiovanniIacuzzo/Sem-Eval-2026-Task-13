@@ -107,27 +107,40 @@ class CodeDataset(Dataset):
 
 def load_data(config, tokenizer, mode="binary"):
     data_dir = config["data"].get("data_dir", "data/Task_B_Processed")
-    train_df = pd.read_parquet(os.path.join(data_dir, f"train_{mode}.parquet"))
-    val_df = pd.read_parquet(os.path.join(data_dir, f"val_{mode}.parquet"))
-
+    
     if mode == "binary":
+        train_df = pd.read_parquet(os.path.join(data_dir, "train_binary.parquet"))
+        val_df = pd.read_parquet(os.path.join(data_dir, "val_binary.parquet"))
+        
+        # Logica di downsampling per Binary (OK quella che avevi)
         df_ai = train_df[train_df['is_ai'] == 1]
-        df_human = train_df[train_df['is_ai'] == 0].sample(n=min(len(df_ai), 30000), random_state=42)
+        df_human = train_df[train_df['is_ai'] == 0].sample(n=min(len(df_ai), 40000), random_state=42)
         train_df = pd.concat([df_ai, df_human]).sample(frac=1, random_state=42)
-        logger.info(f"Binary Downsampled: AI={len(df_ai)}, Human={len(df_human)}")
-    else:
-        if 'family' in train_df.columns:
-            df_human = train_df[train_df['family'] == 'Human']
-            if len(df_human) > 20000:
-                df_other = train_df[train_df['family'] != 'Human']
-                df_human_small = df_human.sample(n=20000, random_state=42)
-                train_df = pd.concat([df_human_small, df_other]).sample(frac=1, random_state=42)
+        
+    elif mode == "families":
+        # CARICHIAMO SOLO IL DATASET FILTRATO AI
+        train_df = pd.read_parquet(os.path.join(data_dir, "train_families.parquet"))
+        val_df = pd.read_parquet(os.path.join(data_dir, "val_families.parquet"))
+        
+        logger.info(f"Family Training Samples (AI Only): {len(train_df)}")
+        logger.info(f"Family Validation Samples (AI Only): {len(val_df)}")
+        
+        # Verifica di sicurezza
+        if 'family_label' not in train_df.columns:
+            raise ValueError("train_families.parquet non ha la colonna 'family_label'")
 
+    # Calcolo pesi classi
     class_weights_tensor = None
-    if mode == "families":
+    if mode == "families" and config["model"].get("class_weights", False):
         y_train = train_df['family_label'].values
+        # Usa labels univoche presenti nel mapping (0..10)
+        classes = np.arange(11) 
         cw = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
-        class_weights_tensor = torch.tensor(cw, dtype=torch.float)
+        # Mappa i pesi su un tensore di dimensione fissa 11 per evitare errori se una classe manca nel train
+        weights_full = np.ones(11)
+        for cls, w in zip(np.unique(y_train), cw):
+            weights_full[cls] = w
+        class_weights_tensor = torch.tensor(weights_full, dtype=torch.float)
 
     train_ds = CodeDataset(train_df, tokenizer, max_length=config["data"]["max_length"], mode=mode, is_train=True)
     val_ds = CodeDataset(val_df, tokenizer, max_length=config["data"]["max_length"], mode=mode, is_train=False)

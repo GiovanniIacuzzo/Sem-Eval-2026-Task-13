@@ -7,7 +7,7 @@ common:
   checkpoint_dir: "results/results_TaskB/checkpoints"
   seed: 42
   fp16: true
-  num_workers: 8
+  num_workers: 4
   num_extra_features: 8
   learning_rate: 2.0e-5
   warmup_ratio: 0.1
@@ -21,9 +21,9 @@ binary:
   model_name: "microsoft/unixcoder-base"
   num_labels: 2
   max_length: 512
-  batch_size: 48
+  batch_size: 32 
   gradient_accumulation_steps: 1
-  num_epochs: 4
+  num_epochs: 5
   early_stop_patience: 2
   class_weights: false
   focal_gamma: 2.0
@@ -34,19 +34,14 @@ binary:
 # -----------------------------------------------------------------------------
 families:
   model_name: "microsoft/unixcoder-base"
-  num_labels: 11
-  use_lora: false
+  num_labels: 11 
+  use_lora: false 
   max_length: 512
-  batch_size: 32           
-  gradient_accumulation_steps: 2
-  num_epochs: 10
-  early_stop_patience: 3
+  batch_size: 24            
+  gradient_accumulation_steps: 3
+  num_epochs: 6
+  early_stop_patience: 4
   learning_rate: 3.0e-5
   class_weights: true
   focal_gamma: 3.0
   label_smoothing: 0.1 
-  
-  loss_weights:
-    w_ce: 1.0
-    w_supcon: 0.8
-    contrastive_temp: 0.07
