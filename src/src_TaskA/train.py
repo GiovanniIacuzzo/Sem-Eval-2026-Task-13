@@ -89,15 +89,27 @@ def load_checkpoint_for_resume(model, checkpoint_path, device):
     head_path = os.path.join(checkpoint_path, "classifier_head.pt")
     proj_path = os.path.join(checkpoint_path, "projector.pt")
     
+    # --- CLASSIFIER HEAD ---
     if os.path.exists(head_path):
-        model.classifier.load_state_dict(torch.load(head_path, map_location=device, weights_only=True))
-        logger.info("Classifier head loaded.")
+        try:
+            state_dict = torch.load(head_path, map_location=device, weights_only=True)
+            model.classifier.load_state_dict(state_dict)
+            logger.info("Classifier head loaded successfully.")
+        except RuntimeError as e:
+            logger.warning(f"ARCHITECTURE MISMATCH for Classifier Head: {e}")
+            logger.warning("--> Discarding old head weights and initializing from scratch (Recommended for architectural changes).")
     else:
         logger.warning(f"Head weights not found at {head_path}! Initializing from scratch.")
     
+    # --- PROJECTOR ---
     if os.path.exists(proj_path):
-        model.extra_projector.load_state_dict(torch.load(proj_path, map_location=device, weights_only=True))
-        logger.info("Projector loaded.")
+        try:
+            state_dict = torch.load(proj_path, map_location=device, weights_only=True)
+            model.extra_projector.load_state_dict(state_dict)
+            logger.info("Projector loaded successfully.")
+        except RuntimeError as e:
+            logger.warning(f"ARCHITECTURE MISMATCH for Projector: {e}")
+            logger.warning("--> Discarding old projector weights and initializing from scratch.")
     else:
         logger.warning(f"Projector weights not found at {proj_path}! Initializing from scratch.")
         

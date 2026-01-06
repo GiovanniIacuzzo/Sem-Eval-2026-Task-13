@@ -47,13 +47,18 @@ class CodeModel(nn.Module):
         # --- OTTIMIZZAZIONE 1: Flash Attention ---
         attn_impl = "flash_attention_2" if config.get("use_flash_attention", True) else "sdpa"
         print(f"Using Attention Implementation: {attn_impl}")
+
+        init_kwargs = {}
+        if torch.cuda.is_available():
+            init_kwargs["device_map"] = "cuda"
         
         self.base_model = AutoModel.from_pretrained(
             self.model_name, 
             config=hf_config, 
             trust_remote_code=True,
             torch_dtype=torch.bfloat16, 
-            attn_implementation=attn_impl
+            attn_implementation=attn_impl,
+            **init_kwargs
         )
         
         # --- OTTIMIZZAZIONE 2: Gradient Checkpointing ---
@@ -80,8 +85,8 @@ class CodeModel(nn.Module):
         # 3. Custom Head
         self.hidden_size = hf_config.hidden_size
         
-        # --- MODIFICA CRUCIALE: 8 Features e Proiezione più ampia ---
-        self.num_extra = 8
+        # --- MODIFICA CRUCIALE: 8 Features e Proiezione ---
+        self.num_extra = 9
         self.extra_proj_dim = 256
 
         # MLP
@@ -117,26 +122,24 @@ class CodeModel(nn.Module):
         outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         
         # 2. Pooling
-        last_hidden_state = outputs.last_hidden_state 
+        last_hidden_state = outputs.last_hidden_state         
         mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
         sum_embeddings = torch.sum(last_hidden_state * mask_expanded, 1)
         sum_mask = torch.clamp(mask_expanded.sum(1), min=1e-9)
         
         semantic_features = sum_embeddings / sum_mask 
         
+        semantic_features = semantic_features.to(dtype=self.sem_norm.weight.dtype)        
         semantic_features = self.sem_norm(semantic_features)
 
         # 3. Gestione Feature Stilistiche
         if extra_features is not None:
-            # Assicuriamo che il dtype sia corretto
             target_dtype = self.extra_projector[0].weight.dtype
             extra_features = extra_features.to(dtype=target_dtype, device=semantic_features.device)
             
-            # Proiezione Stile
             style_features = self.extra_projector(extra_features)
             style_features = self.style_norm(style_features)
         else:
-            # Fallback se mancano features
             target_dtype = self.extra_projector[0].weight.dtype
             style_features = torch.zeros(
                 semantic_features.size(0), self.extra_proj_dim, 
