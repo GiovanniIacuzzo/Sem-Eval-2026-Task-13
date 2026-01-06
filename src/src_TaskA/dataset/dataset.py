@@ -1,160 +1,171 @@
 import torch
 import pandas as pd
-import numpy as np
-import os
-import re
 import logging
-import zlib
 import math
-from collections import Counter
+import random
+import os
 from torch.utils.data import Dataset
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 class CodeDataset(Dataset):
-    def __init__(self, dataframe, tokenizer, max_length=1024, is_train=False):
+    def __init__(self, dataframe, tokenizer, max_length=512, is_train=False, aug_config=None):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.is_train = is_train
         
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            
-        self.input_ids = []
-        self.attention_masks = []
-        self.labels = []
-        self.extra_features = []
+        # Configurazione Data Augmentation
+        self.aug_config = aug_config if aug_config else {}
+        self.aug_prob = self.aug_config.get("prob", 0.7)
+        self.newline_prob = self.aug_config.get("newline_prob", 0.5)
+        self.comment_drop_prob = self.aug_config.get("comment_drop_prob", 0.3)
         
-        # Standardizzazione nomi colonne
-        if 'code' not in dataframe.columns:
-            if 'text' in dataframe.columns: 
-                dataframe = dataframe.rename(columns={'text': 'code'})
-            
-        codes = dataframe['code'].astype(str).tolist()
-        labels = dataframe['label'].astype(int).tolist()
+        # Pulizia preventiva
+        dataframe = dataframe.dropna(subset=['code', 'label'])
         
-        desc = f"[{'Train' if is_train else 'Val'}] Processing & Feature Eng."
+        self.codes = dataframe['code'].astype(str).tolist()
+        self.labels = dataframe['label'].astype(int).tolist()
         
-        for i, code in enumerate(tqdm(codes, desc=desc, leave=False)):
-            label = labels[i]
-            
-            # Estrazione Feature Stilistiche
-            stylistic_feats = self._extract_stylistic_features(code)
-            
-            # Tokenizzazione Ottimizzata
-            encoding = self.tokenizer(
-                code,
-                truncation=True,
-                padding=False, 
-                max_length=self.max_length,
-                return_tensors="pt"
-            )
-            
-            self.input_ids.append(encoding["input_ids"].squeeze(0))
-            self.attention_masks.append(encoding["attention_mask"].squeeze(0))
-            self.labels.append(torch.tensor(label, dtype=torch.long))
-            self.extra_features.append(stylistic_feats)
+        # Log iniziale
+        if is_train:
+            logger.info(f"[Dataset] Initialized Train Set. Augmentation Enabled: {self.aug_prob > 0}")
 
-    def _extract_stylistic_features(self, code):
+    def _augment_code(self, code):
         """
-        Estrae feature statistiche agnostiche rispetto al linguaggio di programmazione.
-        Queste feature aiutano quando il modello incontra linguaggi mai visti (OOD).
+        Data Augmentation parametrica per simulare OOD.
+        """
+        # 1. Skip casuale
+        if random.random() > self.aug_prob:
+            return code
+            
+        lines = code.split('\n')
+        
+        # 2. Inserimento Random Newlines
+        if random.random() < self.newline_prob:
+            if len(lines) > 2:
+                idx = random.randint(0, len(lines)-1)
+                lines.insert(idx, "")
+        
+        # 3. Rimozione commenti casuale
+        if random.random() < self.comment_drop_prob:
+            lines = [l for l in lines if not l.strip().startswith(('#', '//'))]
+            
+        return '\n'.join(lines)
+
+    def _extract_features(self, code):
+        """
+        Estrae feature stilistiche NORMALIZZATE per evitare esplosioni.
+        Usa np.log1p per schiacciare i valori grandi.
         """
         features = []
-        code_len = len(code) + 1e-9
-        lines = code.split('\n')
-        non_empty_lines = [l for l in lines if l.strip()]
+        l_code = len(code) + 1.0
         
-        # --- 1. Shannon Entropy ---
-        counts = Counter(code)
-        probs = [c / code_len for c in counts.values()]
-        entropy = -sum(p * math.log2(p) for p in probs)
-        features.append(entropy / 8.0)
-
-        # --- 2. Zlib Compression Ratio ---
-        compressed_len = len(zlib.compress(code.encode('utf-8')))
-        features.append(compressed_len / code_len)
-
-        # --- 3. Struttura e Spazi ---
-        features.append(code.count(' ') / code_len)
-        features.append((code.count('\t') * 4) / code_len)
+        # 1. Log Length
+        features.append(math.log1p(l_code)) 
         
-        # --- 4. Densità Simboli "Sintattici" ---
-        symbols = len(re.findall(r'[{}()\[\];.,]', code))
-        features.append(symbols / code_len)
+        # 2. Ratio Spazi
+        features.append(code.count(' ') / l_code)
         
-        # --- 5. Statistiche sulle Linee ---
-        if non_empty_lines:
-            line_lengths = [len(l) for l in non_empty_lines]
-            avg_line_len = np.mean(line_lengths)
-            std_line_len = np.std(line_lengths)
-            
-            features.append(min(avg_line_len / 100.0, 1.0)) # Normalizzato
-            features.append(min(std_line_len / 50.0, 1.0))  # Normalizzato
-        else:
-            features.append(0.0)
-            features.append(0.0)
-
-        # --- 6. Ratio Commenti/Codice ---
-        comment_chars = code.count('#') + code.count('//')
-        features.append(comment_chars / code_len)
-
-        # --- 7. Snake vs Camel Case ---
-        snake_count = code.count('_')
-        camel_count = len(re.findall(r'[a-z][A-Z]', code))
-        total_casing = snake_count + camel_count + 1e-9
-        features.append(snake_count / total_casing)
+        # 3. Ratio Newlines
+        features.append(code.count('\n') / l_code)
         
-        # Totale Features: 8
+        # 4. Ratio Simboli Speciali
+        symbols = sum(code.count(c) for c in "{}[];,")
+        features.append(math.log1p(symbols) / math.log1p(l_code))
+        
+        # 5. Comment Density
+        comments = code.count('#') + code.count('//')
+        features.append(comments / (code.count('\n') + 1.0))
+
         return torch.tensor(features, dtype=torch.float32)
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
+        code = self.codes[idx]
+        label = self.labels[idx]
+        
+        # Data Augmentation solo in training
+        if self.is_train:
+            code = self._augment_code(code)
+            
+        # Tokenizzazione UniXcoder
+        inputs = self.tokenizer(
+            code,
+            return_tensors=None, 
+            max_length=self.max_length,
+            truncation=True,
+            padding=False 
+        )
+        
+        # Feature manuali
+        extra = self._extract_features(code)
+
         return {
-            "input_ids": self.input_ids[idx],
-            "attention_mask": self.attention_masks[idx],
-            "labels": self.labels[idx],
-            "extra_features": self.extra_features[idx] 
+            "input_ids": inputs["input_ids"],
+            "attention_mask": inputs["attention_mask"],
+            "labels": label,
+            "extra_features": extra
         }
 
 def load_data(config, tokenizer):
+    """
+    Carica e BILANCIA i dati usando i parametri dal config.
+    """
     data_dir = config["data_dir"]
     train_path = os.path.join(data_dir, "train.parquet")
     val_path = os.path.join(data_dir, "validation.parquet")
 
-    logger.info(f"Loading train data from: {train_path}")
-    train_df = pd.read_parquet(train_path)
-    val_df = pd.read_parquet(val_path)
+    logger.info(f"Loading raw data from {data_dir}...")
+    try:
+        train_df = pd.read_parquet(train_path)
+        val_df = pd.read_parquet(val_path)
+    except Exception as e:
+        logger.error(f"Errore caricamento dati: {e}")
+        raise e
 
-    # Pulizia base
-    train_df = train_df.dropna(subset=['code', 'label'])
-    val_df = val_df.dropna(subset=['code', 'label'])
-    train_df['label'] = train_df['label'].astype(int)
-    val_df['label'] = val_df['label'].astype(int)
-
-    TARGET_TRAIN = 50000 
-    TARGET_VAL = 5000
-    
-    if len(train_df) > TARGET_TRAIN:
-        logger.info(f"Downsampling Train from {len(train_df)} to {TARGET_TRAIN}")
-        train_df = train_df.sample(n=TARGET_TRAIN, random_state=42)
+    # --- STRATEGIA DI BILANCIAMENTO LINGUAGGI ---
+    if config.get("balance_languages", True):
+        target_size = config.get("target_size_per_language", 35000)
+        logger.info(f"Applying Language Balancing (Target per lang: {target_size})...")
         
-    if len(val_df) > TARGET_VAL:
-        logger.info(f"Downsampling Val from {len(val_df)} to {TARGET_VAL}")
-        val_df = val_df.sample(n=TARGET_VAL, random_state=42)
-    
-    logger.info(f"Final Samples -> Train: {len(train_df)}, Val: {len(val_df)}")
+        # Separiamo i linguaggi
+        df_py = train_df[train_df['language'] == 'python']
+        df_cpp = train_df[train_df['language'] == 'c++']
+        df_java = train_df[train_df['language'] == 'java']
+        
+        # Downsampling/Upsampling logica
+        df_py_sample = df_py.sample(n=min(len(df_py), target_size), random_state=42)
+        
+        # C++ e Java: prendiamo tutto
+        df_cpp_sample = df_cpp 
+        df_java_sample = df_java 
+        
+        # Ricombiniamo
+        train_df = pd.concat([df_py_sample, df_cpp_sample, df_java_sample])
+        train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
+        
+        logger.info(f"Balanced Train Size: {len(train_df)} rows")
+        logger.info(f"New Language Dist:\n{train_df['language'].value_counts()}")
 
-    train_ds = CodeDataset(train_df, tokenizer, max_length=config["max_length"], is_train=True)
-    val_ds = CodeDataset(val_df, tokenizer, max_length=config["max_length"], is_train=False)
+    # Estrazione Configurazione Augmentation
+    aug_config = config.get("augmentation", {})
+
+    train_ds = CodeDataset(
+        train_df, 
+        tokenizer, 
+        max_length=config.get("max_length", 512), 
+        is_train=True,
+        aug_config=aug_config
+    )
     
-    # Calcolo pesi classi per la Loss
-    labels = train_df['label'].values
-    classes, counts = np.unique(labels, return_counts=True)
-    weights = len(labels) / (len(classes) * counts)
-    class_weights_tensor = torch.tensor(weights, dtype=torch.float32)
+    val_ds = CodeDataset(
+        val_df, 
+        tokenizer, 
+        max_length=config.get("max_length", 512), 
+        is_train=False,
+        aug_config=None # Niente aug in validation
+    )
     
-    return train_ds, val_ds, class_weights_tensor
+    return train_ds, val_ds, None

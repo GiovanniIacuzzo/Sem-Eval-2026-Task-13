@@ -1,26 +1,42 @@
 common:
+  project_name: "semeval2026_Task13"
+  experiment_name: "subtask-A"
+  
+  # Paths
   data_dir: "data/Task_A"
   checkpoint_dir: "results/results_TaskA/checkpoints"
   
-  use_flash_attention: true
-  gradient_checkpointing: false
-  
-  model_name: "bigcode/starcoder2-3b"
-  num_labels: 2 
-  
+  # Model
+  model_name: "microsoft/unixcoder-base"
+  num_labels: 2
   max_length: 512
-  num_epochs: 6
+  
+  # Hybrid Feature Config
+  use_extra_features: true
+  extra_features_dim: 5
+  style_projection_dim: 64
+  
+  # Loss Config
+  supcon_temperature: 0.1
+  
+  # Training Hyperparameters
   batch_size: 32
-  gradient_accumulation_steps: 2
-  learning_rate: 2.0e-4
+  num_epochs: 6
+  learning_rate: 2.0e-5
+  gradient_accumulation_steps: 1
   early_stop_patience: 3
   
-  focal_gamma: 2.0
-  label_smoothing: 0.1
-  
-  use_lora: true
-  lora_r: 32
-  lora_alpha: 64
-  lora_dropout: 0.05
+  # OOD & Loss Strategy
+  lambda_supcon: 0.5
+  balance_languages: true
+  target_size_per_language: 35000
 
-  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  # Data Augmentation
+  augmentation:
+    prob: 0.7                # Probabilità di attivare l'augmentation su un sample
+    newline_prob: 0.5        # Probabilità di aggiungere newline
+    comment_drop_prob: 0.3   # Probabilità di cancellare commenti
+  
+  # Hardware
+  num_workers: 8
+  seed: 42
