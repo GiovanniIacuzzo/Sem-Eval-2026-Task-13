@@ -112,6 +112,7 @@ class CodeDataset(Dataset):
 def load_data(config, tokenizer):
     """
     Carica e BILANCIA i dati usando i parametri dal config.
+    Versione Robustezza OOD + Debugging.
     """
     data_dir = config["data_dir"]
     train_path = os.path.join(data_dir, "train.parquet")
@@ -125,6 +126,16 @@ def load_data(config, tokenizer):
         logger.error(f"Errore caricamento dati: {e}")
         raise e
 
+    logger.info(f"Train Rows Base: {len(train_df)}")
+    if 'language' in train_df.columns:
+        logger.info(f"Languages found in raw data: {train_df['language'].unique()}")
+        
+        # 1. NORMALIZZAZIONE
+        train_df['language'] = train_df['language'].astype(str).str.lower().str.strip()
+    else:
+        logger.error("CRITICAL: Colonna 'language' non trovata nel dataframe!")
+        raise KeyError("Column 'language' missing")
+
     # --- STRATEGIA DI BILANCIAMENTO LINGUAGGI ---
     if config.get("balance_languages", True):
         target_size = config.get("target_size_per_language", 35000)
@@ -135,8 +146,17 @@ def load_data(config, tokenizer):
         df_cpp = train_df[train_df['language'] == 'c++']
         df_java = train_df[train_df['language'] == 'java']
         
+        logger.info(f"Counts before balance -> Py: {len(df_py)}, C++: {len(df_cpp)}, Java: {len(df_java)}")
+        
+        if len(df_py) == 0 and len(df_cpp) == 0:
+             logger.warning("ATTENZIONE: Non ho trovato né Python né C++. Controlla i nomi dei linguaggi stampati sopra.")
+
         # Downsampling/Upsampling logica
-        df_py_sample = df_py.sample(n=min(len(df_py), target_size), random_state=42)
+        # Python: prendiamo un sample
+        if len(df_py) > target_size:
+            df_py_sample = df_py.sample(n=target_size, random_state=42)
+        else:
+            df_py_sample = df_py
         
         # C++ e Java: prendiamo tutto
         df_cpp_sample = df_cpp 
@@ -147,6 +167,9 @@ def load_data(config, tokenizer):
         train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
         
         logger.info(f"Balanced Train Size: {len(train_df)} rows")
+        if len(train_df) == 0:
+            raise ValueError("Il Dataset di training è VUOTO dopo il bilanciamento. Controlla i nomi dei linguaggi.")
+            
         logger.info(f"New Language Dist:\n{train_df['language'].value_counts()}")
 
     # Estrazione Configurazione Augmentation
@@ -165,7 +188,7 @@ def load_data(config, tokenizer):
         tokenizer, 
         max_length=config.get("max_length", 512), 
         is_train=False,
-        aug_config=None # Niente aug in validation
+        aug_config=None 
     )
     
     return train_ds, val_ds, None

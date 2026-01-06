@@ -4,6 +4,9 @@ import yaml
 import torch
 import argparse
 import logging
+
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+
 import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -18,7 +21,7 @@ transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwarg
 
 from src.src_TaskA.models.model import CodeClassifier
 from src.src_TaskA.dataset.dataset import load_data
-from src.src_TaskA.utils.utils import evaluate_model
+from src.src_TaskA.utils.utils import evaluate_model, DynamicCollate
 
 # -----------------------------------------------------------------------------
 # 1. SETUP & UTILS
@@ -57,32 +60,6 @@ class ConsoleUX:
                 log_str += f"{k}: {metrics[k]:.4f} | "
         logger.info(log_str.strip(" | "))
 
-class DynamicCollate:
-    """
-    Gestisce il padding dinamico. Padda il batch alla lunghezza della sequenza 
-    più lunga NEL BATCH, non alla max_length globale. Ottimizza la VRAM.
-    """
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-
-    def __call__(self, batch):
-        input_ids = [item['input_ids'] for item in batch]
-        attention_mask = [item['attention_mask'] for item in batch]
-        labels = torch.tensor([item['labels'] for item in batch], dtype=torch.long)
-        
-        # Padding intelligente usando il tokenizer
-        padded_inputs = self.tokenizer.pad(
-            {"input_ids": input_ids, "attention_mask": attention_mask},
-            padding=True, 
-            return_tensors="pt"
-        )
-
-        return {
-            "input_ids": padded_inputs["input_ids"],
-            "attention_mask": padded_inputs["attention_mask"],
-            "labels": labels
-        }
-
 def save_checkpoint(model, tokenizer, path, epoch, metrics):
     """Salva modello, tokenizer e metadati."""
     os.makedirs(path, exist_ok=True)
@@ -111,13 +88,17 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, epo
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
+
+        extra_features = batch.get("extra_features", None)
+        if extra_features is not None:
+            extra_features = extra_features.to(device, non_blocking=True)
         
         optimizer.zero_grad(set_to_none=True)
         
         # Mixed Precision Forward
         with autocast(device_type='cuda', dtype=torch.float16):
             # Il modello calcola internamente sia CE che SupCon loss
-            outputs = model(input_ids, attention_mask, labels=labels)
+            outputs = model(input_ids, attention_mask, labels=labels, extra_features=extra_features)
             loss = outputs["loss"]
 
         # Backward scalato
@@ -255,7 +236,7 @@ if __name__ == "__main__":
         ConsoleUX.log_metrics("Train", train_metrics)
         if experiment:
             experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
-            # Loggare il Learning Rate aiuta a debuggare
+            # Loggare il Learning Rate
             experiment.log_metric("lr", scheduler.get_last_lr()[0], step=epoch)
 
         # --- VALIDATION ---

@@ -4,19 +4,24 @@ import yaml
 import torch
 import argparse
 import logging
+import warnings
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
-from peft import PeftModel
-from sklearn.metrics import classification_report, confusion_matrix
-from torch.nn.utils.rnn import pad_sequence
+from sklearn.metrics import classification_report, f1_score
 
-sys.path.append(os.getcwd())
-
-from src.src_TaskA.models.model import CodeModel
+from src.src_TaskA.models.model import CodeClassifier
 from src.src_TaskA.dataset.dataset import CodeDataset
-from src.src_TaskA.utils.utils import set_seed
+from src.src_TaskA.utils.utils import set_seed 
+
+# -----------------------------------------------------------------------------
+# 1. Logging
+# -----------------------------------------------------------------------------
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,213 +31,167 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-class DynamicCollate:
+# -----------------------------------------------------------------------------
+# 2. COLLATOR & UTILS
+# -----------------------------------------------------------------------------
+class InferenceCollate:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
 
     def __call__(self, batch):
         input_ids = [item['input_ids'] for item in batch]
         attention_mask = [item['attention_mask'] for item in batch]
-        if 'labels' in batch[0] and batch[0]['labels'] is not None:
-            labels = torch.stack([item['labels'] for item in batch])
-        else:
-            labels = None
-            
-        extra_features = torch.stack([item['extra_features'] for item in batch])
+        labels = torch.tensor([item['labels'] for item in batch], dtype=torch.long)
         
-        padded_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
-        padded_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0)
+        # Gestione Extra Features
+        extra_features = None
+        if 'extra_features' in batch[0] and batch[0]['extra_features'] is not None:
+            extra_features = torch.stack([item['extra_features'] for item in batch])
         
+        padded_inputs = self.tokenizer.pad(
+            {"input_ids": input_ids, "attention_mask": attention_mask},
+            padding=True, 
+            return_tensors="pt"
+        )
+
         return {
-            "input_ids": padded_ids,
-            "attention_mask": padded_mask,
+            "input_ids": padded_inputs["input_ids"],
+            "attention_mask": padded_inputs["attention_mask"],
             "labels": labels,
             "extra_features": extra_features
         }
 
-def load_trained_model(config, checkpoint_path, device):
-    logger.info(f"🏗️  Building Model Architecture: {config['model_name']}...")
+def load_model(config_path, checkpoint_path, device):
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)["common"]
     
-    model = CodeModel(config)
+    model = CodeClassifier(config)
     
-    logger.info(f"Loading LoRA adapters from {checkpoint_path}...")
+    logger.info(f"Loading weights from: {checkpoint_path}")
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+        
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        k = k.replace("module.", "")
+        new_state_dict[k] = v
+            
     try:
-        model.base_model.load_adapter(checkpoint_path, adapter_name="default")
-    except Exception as e:
-        logger.warning(f"Standard load_adapter failed ({e}). Trying PeftModel fallback...")
-        model.base_model = PeftModel.from_pretrained(model.base_model.base_model, checkpoint_path)
+        model.load_state_dict(new_state_dict, strict=True)
+    except RuntimeError as e:
+        logger.warning(f"Strict loading failed, retrying with strict=False...")
+        model.load_state_dict(new_state_dict, strict=False)
 
-    head_path = os.path.join(checkpoint_path, "classifier_head.pt")
-    proj_path = os.path.join(checkpoint_path, "projector.pt")
-    
-    if os.path.exists(head_path):
-        state_dict = torch.load(head_path, map_location=device, weights_only=True)
-        model.classifier.load_state_dict(state_dict)
-        logger.info("Classifier Head loaded.")
-    else:
-        logger.error(f"Classifier Head NOT FOUND at {head_path}!")
-    
-    if os.path.exists(proj_path):
-        state_dict = torch.load(proj_path, map_location=device, weights_only=True)
-        model.extra_projector.load_state_dict(state_dict)
-        logger.info("Projector loaded.")
-    else:
-        logger.error(f"Projector NOT FOUND at {proj_path}!")
-    
     model.to(device)
     model.eval()
     
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    model.to(dtype=dtype)
-    
-    return model
+    return model, config
 
 def run_inference(model, dataloader, device):
     all_preds = []
-    all_probs = []
     all_labels = []
-    has_labels = False
     
-    logger.info("Starting Inference Loop...")
-    
-    with torch.inference_mode():
-        for i, batch in enumerate(tqdm(dataloader, desc="Predicting")):
+    logger.info("Running Inference...")
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Predicting", leave=False):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
             
             extra_features = batch.get("extra_features", None)
             if extra_features is not None:
-                dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                extra_features = extra_features.to(device, dtype=dtype)
-                
-                # --- CHECK DIMENSIONALE DI SICUREZZA ---
-                if i == 0:
-                    feat_dim = extra_features.shape[1]
-                    model_expect = model.extra_projector[0].in_features
-                    if feat_dim != model_expect:
-                        logger.error(f" FATAL MISMATCH: Dataset produces {feat_dim} features, Model expects {model_expect}!")
-                        logger.error("Update dataset.py or model.py to match exactly.")
-                        raise ValueError("Feature dimension mismatch")
-
-            # Forward
-            logits, _, _ = model(
-                input_ids, attention_mask, extra_features=extra_features
-            )
+                extra_features = extra_features.to(device)
             
-            probs = torch.softmax(logits, dim=1)
+            outputs = model(input_ids, attention_mask, labels=labels, extra_features=extra_features)
+            logits = outputs["logits"]
             preds = torch.argmax(logits, dim=1)
             
-            all_preds.extend(preds.float().cpu().numpy())
-            all_probs.extend(probs.float().cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
             
-            if batch["labels"] is not None:
-                has_labels = True
-                all_labels.extend(batch["labels"].float().cpu().numpy())
-            
-    return all_preds, all_labels if has_labels else None, all_probs
+    return np.array(all_preds), np.array(all_labels)
 
+# -----------------------------------------------------------------------------
+# 3. MAIN
+# -----------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--test_file", type=str, required=True)
+    parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--config", type=str, default="src/src_TaskA/config/config.yaml")
-    parser.add_argument("--test_file", type=str, default="data/Task_A/test.parquet") 
-    parser.add_argument("--checkpoint_dir", type=str, required=True, help="Path to the checkpoint folder (e.g. results/.../best_model)")
-    parser.add_argument("--output_file", type=str, default="predictions.csv")
+    parser.add_argument("--output_dir", type=str, default="results/inference_TaskA")
     args = parser.parse_args()
-    
-    ConsoleUX.print_banner("Inference SemEval 2026")
-    set_seed(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Load Config
-    with open(args.config, "r") as f:
-        config = yaml.safe_load(f)["common"]
 
-    # 1. Load Data
-    logger.info(f"Loading Test Data from {args.test_file}...")
-    if not os.path.exists(args.test_file):
-        raise FileNotFoundError(f"Test file not found: {args.test_file}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    set_seed(42)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # 1. Load Model
+    model, config = load_model(args.config, args.checkpoint, device)
+    
+    try:
+        from transformers import logging as hf_logging
+        hf_logging.set_verbosity_error()
+    except ImportError:
+        pass
         
+    tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
+
+    # 2. Data
+    logger.info(f"Loading Test Data: {args.test_file}")
     df_test = pd.read_parquet(args.test_file)
     
-    if 'code' not in df_test.columns and 'text' in df_test.columns:
-        df_test = df_test.rename(columns={'text': 'code'})
+    test_ds = CodeDataset(
+        df_test, 
+        tokenizer, 
+        max_length=config["max_length"], 
+        is_train=False,
+        aug_config=None 
+    )
     
-    if 'label' not in df_test.columns:
-        logger.info(" 'label' column missing. Running in BLIND TEST mode.")
-        df_test['label'] = 0
-        has_ground_truth = False
-    else:
-        df_test = df_test.dropna(subset=['label'])
-        df_test['label'] = df_test['label'].astype(int)
-        has_ground_truth = True
-        
-    logger.info(f"Test Samples: {len(df_test)}")
-
-    # 2. Tokenizer & Dataset
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint_dir)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        
-    test_ds = CodeDataset(df_test, tokenizer, max_length=config["max_length"], is_train=False)
-    collate_fn = DynamicCollate(tokenizer)
+    collate_fn = InferenceCollate(tokenizer)
     
     test_dl = DataLoader(
-        test_ds,
-        batch_size=config["batch_size"],
-        shuffle=False,
+        test_ds, 
+        batch_size=config["batch_size"] * 2,
+        shuffle=False, 
         num_workers=4,
         collate_fn=collate_fn
     )
 
-    # 3. Model
-    model = load_trained_model(config, args.checkpoint_dir, device)
+    # 3. Inference
+    preds, labels = run_inference(model, test_dl, device)
 
-    # 4. Inference
-    preds, labels, probs = run_inference(model, test_dl, device)
-
-    # 5. Report & Save
-    logger.info("\n" + "="*50)
+    # 4. Results
+    logger.info("-" * 40)
+    logger.info("GLOBAL RESULTS")
+    logger.info("-" * 40)
+    print(classification_report(labels, preds, target_names=["Human", "AI"], digits=4))
     
-    # Se abbiamo le label, calcoliamo le metriche
-    if has_ground_truth and labels is not None:
-        logger.info("COMPUTING METRICS (Validation Mode)\n")
-        label_names = ["Human", "AI"]
-        try:
-            report = classification_report(labels, preds, target_names=label_names, digits=4)
-            print("\n" + report)
-            cm = confusion_matrix(labels, preds)
-            logger.info(f"Confusion Matrix:\n{cm}")
-        except Exception as e:
-            logger.warning(f"Could not compute metrics: {e}")
-    else:
-        logger.info("📦 GENERATING SUBMISSION (Blind Test Mode)")
+    # 5. Language Stats
+    if 'language' in df_test.columns:
+        logger.info("-" * 40)
+        logger.info("PER-LANGUAGE PERFORMANCE")
+        logger.info("-" * 40)
+        df_test['pred'] = preds
+        
+        stats = []
+        for lang in df_test['language'].unique():
+            subset = df_test[df_test['language'] == lang]
+            if len(subset) > 0:
+                f1 = f1_score(subset['label'], subset['pred'], average='macro', zero_division=0)
+                stats.append({"Language": lang, "Count": len(subset), "F1 Macro": f1})
+            
+        results_df = pd.DataFrame(stats).sort_values(by="F1 Macro", ascending=False)
+        print(results_df.to_string(index=False))
 
-    # 6. Save Predictions
-    df_res = pd.DataFrame()
-    if 'id' in df_test.columns:
-        df_res['id'] = df_test['id']
-    
-    df_res["label"] = [int(p) for p in preds]
-    df_res["prob_human"] = [p[0] for p in probs]
-    df_res["prob_ai"] = [p[1] for p in probs]
-    
-    if has_ground_truth:
-        df_res["true_label"] = labels
-
-    df_res.to_csv(args.output_file, index=False)
-    logger.info(f"Predictions saved to {args.output_file}")
-    
-    if 'id' in df_res.columns:
-        sub_file = args.output_file.replace(".csv", "_submission.txt")
-        df_res[['id', 'label']].to_csv(sub_file, index=False, sep='\t')
-        logger.info(f"Submission file ready: {sub_file}")
-
-class ConsoleUX:
-    @staticmethod
-    def print_banner(text):
-        print(f"\n{'-'*60}\n{text.center(60)}\n{'-'*60}")
+    # Save Errors
+    errors_df = df_test[df_test['pred'] != df_test['label']]
+    error_path = os.path.join(args.output_dir, "errors.csv")
+    errors_df.to_csv(error_path, index=False)
+    logger.info(f"Saved {len(errors_df)} errors to {error_path}")
 
 if __name__ == "__main__":
     main()

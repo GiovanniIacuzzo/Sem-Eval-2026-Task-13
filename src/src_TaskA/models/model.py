@@ -29,7 +29,7 @@ class AttentionPooler(nn.Module):
         scores = self.out_proj(x).squeeze(-1) # [Batch, Seq]
         
         # Masking: setta i token di padding a -inf
-        mask_value = -1e9
+        mask_value = -1e4
         scores = scores.masked_fill(attention_mask == 0, mask_value)
         
         # Softmax per ottenere i pesi (somma = 1)
@@ -58,14 +58,14 @@ class ProjectionHead(nn.Module):
 
 class StyleProjector(nn.Module):
     """
-    Proietta le feature manuali (scalari) in uno spazio vettoriale denso
-    da concatenare all'embedding del testo.
+    Proietta le feature manuali. 
+    USA LAYERNORM INVECE DI BATCHNORM PER ROBUSTEZZA OOD.
     """
     def __init__(self, input_dim: int, output_dim: int = 64):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, output_dim),
-            nn.BatchNorm1d(output_dim),
+            nn.LayerNorm(output_dim),
             nn.Mish(),
             nn.Dropout(0.1)
         )
