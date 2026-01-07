@@ -147,21 +147,25 @@ def load_data(config, tokenizer):
         df_java = train_df[train_df['language'] == 'java']
         
         logger.info(f"Counts before balance -> Py: {len(df_py)}, C++: {len(df_cpp)}, Java: {len(df_java)}")
-        
-        if len(df_py) == 0 and len(df_cpp) == 0:
-             logger.warning("ATTENZIONE: Non ho trovato né Python né C++. Controlla i nomi dei linguaggi stampati sopra.")
-
-        # Downsampling/Upsampling logica
-        # Python: prendiamo un sample
+                
+        # 1. Python (Maggioranza): Downsampling
         if len(df_py) > target_size:
             df_py_sample = df_py.sample(n=target_size, random_state=42)
         else:
             df_py_sample = df_py
         
-        # C++ e Java: prendiamo tutto
-        df_cpp_sample = df_cpp 
-        df_java_sample = df_java 
-        
+        # 2. C++ (Minoranza): Upsampling con Replacement
+        if len(df_cpp) > 0:
+            df_cpp_sample = df_cpp.sample(n=target_size, replace=True, random_state=42)
+        else:
+            df_cpp_sample = df_cpp
+            
+        # 3. Java (Minoranza): Upsampling con Replacement
+        if len(df_java) > 0:
+            df_java_sample = df_java.sample(n=target_size, replace=True, random_state=42)
+        else:
+            df_java_sample = df_java
+                
         # Ricombiniamo
         train_df = pd.concat([df_py_sample, df_cpp_sample, df_java_sample])
         train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)

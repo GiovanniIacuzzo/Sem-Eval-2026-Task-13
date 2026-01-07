@@ -10,7 +10,7 @@
 
 Unlike Subtask A (binary), **Subtask B** addresses a **Fine-Grained Classification** challenge. The goal is to identify **which specific author** (human or AI model) generated a given code snippet.
 
-- **Labels:** 31+ classes (e.g., `human`, `gpt-4o`, `llama-3.1-8b`, `starcoder`, etc.)
+- **Labels:** 11 classes (e.g., `human`, `gpt-4o`, `llama-3.1-8b`, `starcoder`, etc.)
 - **Input:** Multilingual source code snippets
 - **Key Challenge:** The dataset exhibits strong imbalance and includes **OOD (Out-Of-Distribution)** scenarios.
 
@@ -82,12 +82,12 @@ This information helps to understand:
 
 To start the training pipeline with logging to console, TensorBoard, and CometML:
 ```bash
-python -m src.src_TaskB.train.binary
+python -m src.src_TaskB.train --mode binary
 ```
 
 Subsequently, once the binary training is complete, run:
 ```bash
-python -m src.src_TaskB.train.families
+python -m src.src_TaskB.train --mode families
 ```
 
 The output will include a progress bar with real-time metrics. The best model (based on Macro-F1) will be automatically saved in `results/results_TaskB/checkpoints/`.
@@ -96,9 +96,54 @@ The output will include a progress bar with real-time metrics. The best model (b
 
 To generate the valid `submission_task_b.csv` file for the leaderboard:
 ```bash
-python -m src.src_TaskB.generate_submission
+python -m src.src_TaskB.generate_submission \
+  --test_file data/data_TaskB/test.parquet \
+  --ckpt_binary results/results_TaskB/checkpoints/binary/best_model \
+  --ckpt_families results/results_TaskB/checkpoints/families/best_model \
+  --data_dir data/Task_B_Processed \
+  --output_file results/results_TaskB/submission/submission_task_b.csv
 ```
 The script automatically detects the `test.parquet` file (searching also within Kaggle download subfolders) and generates the file in `results/results_TaskB/submission/submission_task_b.csv`.
+
+---
+
+## ⚙️ Methodology and Architecture
+
+To address the complexity of the task and the strong imbalance towards the *Human* class, a **Cascade Inference Pipeline** based on a hybrid neural architecture was implemented.
+
+### 1. Cascade Ensemble Strategy
+
+Instead of a single 11-class classifier, the problem was divided into two logical stages to maximize precision:
+
+```mermaid
+graph TD;
+    A[Input Code Snippet] --> B{Binary Classifier};
+    B -- Human --> C[Label: HUMAN];
+    B -- AI --> D{Family Classifier};
+    D --> E[Label: GPT / Llama / StarCoder ...];
+```
+
+- **Stage 1 (Binary)**: A specialized model distinguishes only between `Human `vs `AI`. This protects against AI false positives on human code (the majority class).
+
+- **Stage 2 (Families)**: If the first model predicts "AI", the snippet is passed to a second model trained exclusively on LLM families (excluding humans) to identify the specific family.
+
+### 2. Custom Model Architecture
+
+The core of the system is a custom `CodeClassifier` class that extends **UniXcoder-base** (`microsoft/unixcoder-base`) with specific components for authorship attribution:
+
+- **Attention Pooling**: Instead of using only the `[CLS]` token, a weighted sum of all tokens is calculated based on their relevance, better capturing stylistic patterns diffused throughout the code.
+
+- **Stylistic Features Injection**: **8 handcrafted stylistic features** are extracted (e.g., comment density, snake_case vs camelCase, average indentation, logical tokens) and projected into a latent space via a `StyleProjector`.
+
+- **Feature Fusion**: The semantic embedding (UniXcoder) and the stylistic embedding are concatenated before classification.
+
+### 3. Training Strategies
+
+**Supervised Contrastive Learning (SupCon)**: During the Families training, a contrastive loss is used to pull snippets of the same family closer in vector space and push different ones apart, improving the separation between similar models (e.g., Llama vs Mistral).
+
+**Focal Loss**: Used instead of standard CrossEntropy to penalize errors on hard/rare classes and handle dataset imbalance.
+
+**Mixed Precision & Gradient Accumulation**: Training optimized in FP16 with gradient accumulation to simulate larger batch sizes on consumer GPUs.
 
 ---
 
@@ -128,11 +173,6 @@ The script automatically detects the `test.parquet` file (searching also within 
 │       │
 │       └── 🐍 train.py
 ```
-
----
-
-> [!CAUTION]
-> README ANCORA IN FASE DI SVILUPPO...
 
 ---
 

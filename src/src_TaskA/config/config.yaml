@@ -11,31 +11,30 @@ common:
   num_labels: 2
   max_length: 512
   
-  # Hybrid Feature Config
   use_extra_features: true
   extra_features_dim: 5
   style_projection_dim: 64
   
-  # Loss Config
+  # --- LOSS STRATEGY ---
   supcon_temperature: 0.1
+  lambda_supcon: 0.0
   
-  # Training Hyperparameters
-  batch_size: 32
+  # --- TRAINING HYPERPARAMETERS ---
+  batch_size: 24
   num_epochs: 6
   learning_rate: 2.0e-5
   gradient_accumulation_steps: 1
   early_stop_patience: 3
   
-  # OOD & Loss Strategy
-  lambda_supcon: 0.5
+  # --- DATA BALANCING ---
   balance_languages: true
-  target_size_per_language: 35000
+  target_size_per_language: 50000 
 
-  # Data Augmentation
+  # --- DATA AUGMENTATION ---
   augmentation:
-    prob: 0.7                # Probabilità di attivare l'augmentation su un sample
-    newline_prob: 0.5        # Probabilità di aggiungere newline
-    comment_drop_prob: 0.3   # Probabilità di cancellare commenti
+    prob: 0.7                
+    newline_prob: 0.5        
+    comment_drop_prob: 0.3   
   
   # Hardware
   num_workers: 8

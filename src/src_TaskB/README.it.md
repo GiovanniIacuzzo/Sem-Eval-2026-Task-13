@@ -10,7 +10,7 @@
 
 A differenza del Subtask A (binario), il **Subtask B** affronta una sfida di **Fine-Grained Classification**. L'obiettivo è identificare **quale specifico autore** (umano o modello AI) ha generato un determinato snippet di codice.
 
-- **Etichette:** 31+ classi (es. `human`, `gpt-4o`, `llama-3.1-8b`, `starcoder`, ecc.)
+- **Etichette:** 11 classi (es. `human`, `gpt-4o`, `llama-3.1-8b`, `starcoder`, ecc.)
 - **Input:** Snippet di codice sorgente multilingua
 - **Sfida principale:** Il dataset presenta un forte sbilanciamento e include scenari **OOD (Out-Of-Distribution)**.
 
@@ -76,17 +76,57 @@ Queste informazioni aiutano a capire:
 
 ---
 
+## ⚙️ Metodologia e Architettura
+
+Per affrontare la complessità del task e il forte sbilanciamento verso la classe *Human*, è stata implementata una **Pipeline a Cascata (Cascade Inference)** basata su un'architettura ibrida neurale.
+
+### 1. Cascade Ensemble Strategy
+
+Invece di un singolo classificatore a 11 classi, il problema è stato diviso in due stadi logici per massimizzare la precisione:
+
+```mermaid
+graph TD;
+    A[Input Code Snippet] --> B{Binary Classifier};
+    B -- Human --> C[Label: HUMAN];
+    B -- AI --> D{Family Classifier};
+    D --> E[Label: GPT / Llama / StarCoder ...];
+```
+
+- **Stage 1 (Binary)**: Un modello specializzato distingue solo tra `Human` vs `AI`. Questo protegge dai falsi positivi AI su codice umano (la classe maggioritaria).
+
+- **Stage 2 (Families)**: Se il primo modello predice "AI", lo snippet passa a un secondo modello addestrato esclusivamente sulle famiglie di LLM (escludendo gli umani) per identificare la famiglia specifica.
+
+### 2. Custom Model Architecture
+
+Il cuore del sistema è una classe custom `CodeClassifier` che estende **UniXcoder-base** (`microsoft/unixcoder-base`) con componenti specifici per l'attribuzione di paternità:
+
+- **Attention Pooling**: Invece di usare solo il token `[CLS]`, viene calcolata una somma pesata di tutti i token basata sulla loro rilevanza, catturando meglio pattern stilistici diffusi nel codice.
+
+- **Stylistic Features Injection**: Vengono estratte **8 feature stilistiche manuali** (es. densità di commenti, snake_case vs camelCase, indentazione media, token logici) e proiettate in uno spazio latente tramite uno `StyleProjector`.
+
+- **Feature Fusion**: L'embedding semantico (UniXcoder) e l'embedding stilistico vengono concatenati prima della classificazione.
+
+### 3. Strategie di Training
+
+**Supervised Contrastive Learning (SupCon)**: Nel training delle Families, viene utilizzata una loss contrastiva per avvicinare nello spazio vettoriale gli snippet della stessa famiglia e allontanare quelli diversi, migliorando la separazione tra modelli simili (es. Llama vs Mistral).
+
+**Focal Loss**: Utilizzata al posto della CrossEntropy standard per penalizzare gli errori sulle classi difficili/rare e gestire lo sbilanciamento del dataset.
+
+**Mixed Precision & Gradient Accumulation**: Training ottimizzato in FP16 con accumulo dei gradienti per simulare batch size più grandi su GPU consumer.
+
+---
+
 ## 🚀 Istruzioni per l'Esecuzione
 
 ### 1. Addestramento
 
 Per avviare la training pipeline con logging su console, TensorBoard e CometML:
 ```bash
-python -m src.src_TaskB.train.binary
+python -m src.src_TaskB.train --mode binary
 ```
 Successivamente dopo aver fatto il train binario dovrai:
 ```bash
-python -m src.src_TaskB.train.families
+python -m src.src_TaskB.train --mode families
 ```
 
 L'output includerà una progress bar con metriche in tempo reale. Il miglior modello (basato su Macro-F1) verrà salvato automaticamente in `results/results_TaskB/checkpoints/`.
@@ -95,7 +135,12 @@ L'output includerà una progress bar con metriche in tempo reale. Il miglior mod
 
 Per generare il file `submission_task_b.csv` valido per la leaderboard:
 ```bash
-python -m src.src_TaskB.generate_submission
+python -m src.src_TaskB.generate_submission \
+  --test_file data/data_TaskB/test.parquet \
+  --ckpt_binary results/results_TaskB/checkpoints/binary/best_model \
+  --ckpt_families results/results_TaskB/checkpoints/families/best_model \
+  --data_dir data/Task_B_Processed \
+  --output_file results/results_TaskB/submission/submission_task_b.csv
 ```
 Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle sottocartelle di download Kaggle) e genera il file in `results/results_TaskB/submission/submission_task_b.csv`.
 
@@ -121,17 +166,13 @@ Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle 
 │       │   └── 🐍 utils.py
 │       │
 │       ├── 📝 README.md
+│       ├── 📝 README.it.md
 │       │
 │       ├── 🐍 generate_submission.py
 │       ├── 🐍 inference.py
 │       │
 │       └── 🐍 train.py
 ```
-
----
-
-> [!CAUTION]
-> README ANCORA IN FASE DI SVILUPPO...
 
 ---
 
