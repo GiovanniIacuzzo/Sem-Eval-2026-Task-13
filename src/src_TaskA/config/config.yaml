@@ -1,41 +1,56 @@
 common:
+  # ---------------------------------------------------------------------------
+  # PROJECT META
+  # ---------------------------------------------------------------------------
   project_name: "semeval2026_Task13"
-  experiment_name: "subtask-A"
+  experiment_name: "Subtask-A"
   
-  # Paths
+  # ---------------------------------------------------------------------------
+  # PATHS
+  # ---------------------------------------------------------------------------
   data_dir: "data/Task_A"
   checkpoint_dir: "results/results_TaskA/checkpoints"
   
-  # Model
+  # ---------------------------------------------------------------------------
+  # MODEL ARCHITECTURE
+  # ---------------------------------------------------------------------------
   model_name: "microsoft/unixcoder-base"
   num_labels: 2
   max_length: 512
-  
   use_extra_features: true
-  extra_features_dim: 5
+  
+  # 1.LogLen, 2.Entropy, 3.SnakeRatio, 4.CamelRatio, 
+  # 5.TokenRatio, 6.EmptyLines, 7.DirtyMarkers, 8.Perplexity
+  extra_features_dim: 8       
+  
   style_projection_dim: 64
   
-  # --- LOSS STRATEGY ---
+  # ---------------------------------------------------------------------------
+  # LOSS LANDSCAPE & REGULARIZATION
+  # ---------------------------------------------------------------------------
   supcon_temperature: 0.1
-  lambda_supcon: 0.0
+  lambda_supcon: 0.4          
   
-  # --- TRAINING HYPERPARAMETERS ---
-  batch_size: 24
+  # Adversarial Training (DANN):
+  lambda_adversarial: 0.01     
+  dropout_prob: 0.15          
+  
+  # ---------------------------------------------------------------------------
+  # TRAINING HYPERPARAMETERS
+  # ---------------------------------------------------------------------------
+  batch_size: 32              
   num_epochs: 6
-  learning_rate: 2.0e-5
-  gradient_accumulation_steps: 1
-  early_stop_patience: 3
+  learning_rate: 1.5e-5       
+  early_stop_patience: 3      
   
-  # --- DATA BALANCING ---
+  # ---------------------------------------------------------------------------
+  # DATA STRATEGY
+  # ---------------------------------------------------------------------------
   balance_languages: true
-  target_size_per_language: 50000 
+  target_size_per_language: 25000 
 
-  # --- DATA AUGMENTATION ---
-  augmentation:
-    prob: 0.7                
-    newline_prob: 0.5        
-    comment_drop_prob: 0.3   
-  
-  # Hardware
-  num_workers: 8
+  # ---------------------------------------------------------------------------
+  # HARDWARE
+  # ---------------------------------------------------------------------------
+  num_workers: 4              
   seed: 42

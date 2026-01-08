@@ -20,7 +20,7 @@ import transformers.utils.import_utils
 transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
 
 from src.src_TaskA.models.model import CodeClassifier
-from src.src_TaskA.dataset.dataset import load_data
+from src.src_TaskA.dataset.dataset import load_data_lolo 
 from src.src_TaskA.utils.utils import evaluate_model, DynamicCollate
 
 # -----------------------------------------------------------------------------
@@ -54,33 +54,34 @@ class ConsoleUX:
     @staticmethod
     def log_metrics(stage, metrics):
         log_str = f"[{stage}] "
-        keys = ["loss", "accuracy", "f1_macro", "precision_macro", "recall_macro"]
+        # Aggiungiamo chiavi per monitorare l'avversario se presenti
+        keys = ["loss", "loss_task", "loss_adv", "accuracy", "f1_macro"]
         for k in keys:
             if k in metrics:
                 log_str += f"{k}: {metrics[k]:.4f} | "
         logger.info(log_str.strip(" | "))
 
-def save_checkpoint(model, tokenizer, path, epoch, metrics):
-    """Salva modello, tokenizer e metadati."""
+def save_checkpoint(model, tokenizer, path, epoch, metrics, config):
+    """Salva modello, tokenizer e metadati completi."""
     os.makedirs(path, exist_ok=True)
     logger.info(f"Saving checkpoint to {path}...")
     
-    # Salviamo lo state_dict del modello
     torch.save(model.state_dict(), os.path.join(path, "model_state.bin"))
     tokenizer.save_pretrained(path)
     
-    # Salviamo i metadati
     with open(os.path.join(path, "training_meta.yaml"), "w") as f:
-        yaml.dump({"epoch": epoch, "metrics": metrics}, f)
+        yaml.dump({"epoch": epoch, "metrics": metrics, "config": config}, f)
 
 # -----------------------------------------------------------------------------
-# 2. TRAINING ENGINE
+# 2. TRAINING ENGINE (ADVERSARIAL AWARE)
 # -----------------------------------------------------------------------------
 def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, epoch_idx):
     model.train()
+
     running_loss = 0.0
+    running_loss_task = 0.0
+    running_loss_adv = 0.0
     
-    # Barra di progresso dinamica
     pbar = tqdm(dataloader, desc=f"Train Epoch {epoch_idx+1}", leave=False, dynamic_ncols=True)
     
     for batch in pbar:
@@ -88,23 +89,35 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, epo
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
-
+        
+        # Gestione Extra Features (Feature Purificate)
         extra_features = batch.get("extra_features", None)
         if extra_features is not None:
             extra_features = extra_features.to(device, non_blocking=True)
+            
+        # Gestione Adversarial Labels (Language IDs)
+        lang_labels = batch.get("language_labels", None)
+        if lang_labels is not None:
+            lang_labels = lang_labels.to(device, non_blocking=True)
         
         optimizer.zero_grad(set_to_none=True)
         
         # Mixed Precision Forward
         with autocast(device_type='cuda', dtype=torch.float16):
-            # Il modello calcola internamente sia CE che SupCon loss
-            outputs = model(input_ids, attention_mask, labels=labels, extra_features=extra_features)
+            outputs = model(
+                input_ids, 
+                attention_mask, 
+                labels=labels, 
+                extra_features=extra_features,
+                language_labels=lang_labels
+            )
             loss = outputs["loss"]
+            detailed_losses = outputs.get("detailed_losses", {})
 
         # Backward scalato
         scaler.scale(loss).backward()
         
-        # Gradient Clipping e Optimizer Step
+        # Gradient Clipping
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
@@ -114,27 +127,42 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, epo
         if scheduler is not None:
             scheduler.step()
         
-        # Logging
+        # Logging Accumulators
         current_loss = loss.item()
         running_loss += current_loss
-        pbar.set_postfix({"Loss": f"{current_loss:.4f}"})
+        running_loss_task += detailed_losses.get("loss_task", 0.0)
+        running_loss_adv += detailed_losses.get("loss_adv", 0.0)
+        
+        pbar.set_postfix({
+            "Tot": f"{current_loss:.3f}", 
+            "Task": f"{detailed_losses.get('loss_task', 0):.3f}",
+            "Adv": f"{detailed_losses.get('loss_adv', 0):.3f}"
+        })
 
-    avg_loss = running_loss / len(dataloader)
-    return {"loss": avg_loss}
+    # Calcolo Medie
+    n_batches = len(dataloader)
+    return {
+        "loss": running_loss / n_batches,
+        "loss_task": running_loss_task / n_batches,
+        "loss_adv": running_loss_adv / n_batches
+    }
 
 # -----------------------------------------------------------------------------
 # 3. MAIN EXECUTION
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
+
+    parser = argparse.ArgumentParser(description="SemEval Task A - Domain Adversarial Training")
+    parser.add_argument("--config", type=str, default="src/src_TaskA/config/config.yaml", help="Path to config file")    
+    parser.add_argument("--holdout_language", type=str, default=None, 
+                        help="Language to exclude from training (for OOD Validation). E.g., 'Python'")
     
-    parser = argparse.ArgumentParser(description="SemEval Task A Training Script")
-    parser.add_argument("--config", type=str, default="src/src_TaskA/config/config.yaml", help="Path to config file")
     args = parser.parse_args()
     
-    ConsoleUX.print_banner("SemEval 2026 - Task 13 - Subtask A")
+    ConsoleUX.print_banner("SemEval 2026 - Task 13 - Subtask A (DANN Mode)")
     
-    # Load Config
+    # 1. Load Config
     if not os.path.exists(args.config):
         logger.error(f"Config file not found at {args.config}")
         sys.exit(1)
@@ -144,37 +172,40 @@ if __name__ == "__main__":
         
     set_seed(config["seed"])
     
-    # Setup Comet ML
+    # 2. Setup Comet ML
     api_key = os.getenv("COMET_API_KEY")
     if api_key:
         experiment = Experiment(
             api_key=api_key,
-            project_name=config.get("project_name", "semeval-task-a"),
+            project_name=config.get("project_name", "semeval-task-a-ood"),
             auto_metric_logging=False
         )
-        experiment.set_name(config.get("experiment_name", "Run"))
+        experiment.set_name(f"OOD-{args.holdout_language}" if args.holdout_language else "Standard-Run")
         experiment.log_parameters(config)
-        logger.info("Comet ML initialized successfully.")
+        if args.holdout_language:
+            experiment.log_parameter("holdout_language", args.holdout_language)
     else:
-        logger.warning("COMET_API_KEY not found. Logging will be local only.")
         experiment = None
 
-    # Device Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using Device: {device}")
 
-    # 1. Tokenizer
+    # 3. Tokenizer
     logger.info(f"Loading Tokenizer: {config['model_name']}")
     tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
 
-    # 2. Data Loading
-    logger.info("Loading Datasets...")
-    # La logica di bilanciamento (Python Downsampling) è dentro load_data -> CodeDataset
-    train_dataset, val_dataset, _ = load_data(config, tokenizer)
+    # 4. Data Loading (LOLO Strategy)
+    train_dataset, val_dataset, lang2id = load_data_lolo(
+        config, 
+        tokenizer, 
+        holdout_language=args.holdout_language
+    )
+    
+    config["num_languages"] = len(lang2id)
+    logger.info(f"Model configured for {config['num_languages']} adversarial languages.")
     
     collate_fn = DynamicCollate(tokenizer)
     
-    # DataLoader Ottimizzati
     train_dl = DataLoader(
         train_dataset, 
         batch_size=config["batch_size"], 
@@ -188,7 +219,6 @@ if __name__ == "__main__":
     
     val_dl = DataLoader(
         val_dataset, 
-        # Possiamo raddoppiare il batch in val perché non salviamo i gradienti
         batch_size=config["batch_size"] * 2, 
         shuffle=False, 
         num_workers=config["num_workers"],
@@ -196,11 +226,11 @@ if __name__ == "__main__":
         collate_fn=collate_fn
     )
 
-    # 3. Model Init
+    # 5. Model Init
     model = CodeClassifier(config)
     model.to(device)
     
-    # 4. Optimizer & Scheduler
+    # 6. Optimizer & Scheduler
     optimizer = AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
         lr=float(config["learning_rate"]), 
@@ -209,20 +239,23 @@ if __name__ == "__main__":
     
     scaler = GradScaler()
     
-    # Usiamo OneCycleLR come nel tuo Task B: convergenza più veloce
     total_steps = len(train_dl) * config["num_epochs"]
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=float(config["learning_rate"]), 
         total_steps=total_steps,
-        pct_start=0.1 # 10% warmup
+        pct_start=0.1
     )
 
-    # 5. Training Loop
+    # 7. Training Loop
     best_f1 = float("-inf")
     patience_counter = 0
     patience = config.get("early_stop_patience", 3)
     checkpoint_dir = config["checkpoint_dir"]
+    
+    # Se stiamo facendo LOLO, salviamo in una cartella specifica
+    if args.holdout_language:
+        checkpoint_dir = os.path.join(checkpoint_dir, f"holdout_{args.holdout_language}")
 
     logger.info("Starting Training...")
     
@@ -234,19 +267,19 @@ if __name__ == "__main__":
             model, train_dl, optimizer, scheduler, scaler, device, epoch
         )
         ConsoleUX.log_metrics("Train", train_metrics)
+        
         if experiment:
             experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
-            # Loggare il Learning Rate
             experiment.log_metric("lr", scheduler.get_last_lr()[0], step=epoch)
 
         # --- VALIDATION ---
         val_metrics, val_report = evaluate_model(model, val_dl, device)
         
         ConsoleUX.log_metrics("Valid", val_metrics)
+        logger.info(f"\n{val_report}")
+        
         if experiment:
             experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
-            
-        logger.info(f"\n{val_report}")
 
         # --- CHECKPOINTING ---
         current_f1 = val_metrics["f1_macro"]
@@ -256,7 +289,7 @@ if __name__ == "__main__":
             patience_counter = 0
             
             save_path = os.path.join(checkpoint_dir, "best_model")
-            save_checkpoint(model, tokenizer, save_path, epoch, val_metrics)
+            save_checkpoint(model, tokenizer, save_path, epoch, val_metrics, config)
             
             logger.info(f"---> New Best F1: {best_f1:.4f}. Model Saved.")
             

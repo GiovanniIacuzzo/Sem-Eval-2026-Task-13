@@ -2,80 +2,121 @@ import torch
 import pandas as pd
 import logging
 import math
-import random
 import os
+import re
+import collections
+import numpy as np
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# 1. DATASET CLASS
+# =============================================================================
 class CodeDataset(Dataset):
-    def __init__(self, dataframe, tokenizer, max_length=512, is_train=False, aug_config=None):
+    def __init__(self, dataframe, tokenizer, lang2id, max_length=512, feature_stats=None):
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.is_train = is_train
+        self.lang2id = lang2id
         
-        # Configurazione Data Augmentation
-        self.aug_config = aug_config if aug_config else {}
-        self.aug_prob = self.aug_config.get("prob", 0.7)
-        self.newline_prob = self.aug_config.get("newline_prob", 0.5)
-        self.comment_drop_prob = self.aug_config.get("comment_drop_prob", 0.3)
-        
-        # Pulizia preventiva
-        dataframe = dataframe.dropna(subset=['code', 'label'])
+        dataframe = dataframe.reset_index(drop=True)
         
         self.codes = dataframe['code'].astype(str).tolist()
         self.labels = dataframe['label'].astype(int).tolist()
+        self.languages = dataframe['language'].astype(str).tolist()
         
-        # Log iniziale
-        if is_train:
-            logger.info(f"[Dataset] Initialized Train Set. Augmentation Enabled: {self.aug_prob > 0}")
+        self.lang_ids = [self.lang2id[l] if l in self.lang2id else -1 for l in self.languages]
 
-    def _augment_code(self, code):
-        """
-        Data Augmentation parametrica per simulare OOD.
-        """
-        # 1. Skip casuale
-        if random.random() > self.aug_prob:
-            return code
-            
-        lines = code.split('\n')
-        
-        # 2. Inserimento Random Newlines
-        if random.random() < self.newline_prob:
-            if len(lines) > 2:
-                idx = random.randint(0, len(lines)-1)
-                lines.insert(idx, "")
-        
-        # 3. Rimozione commenti casuale
-        if random.random() < self.comment_drop_prob:
-            lines = [l for l in lines if not l.strip().startswith(('#', '//'))]
-            
-        return '\n'.join(lines)
+        if 'perplexity' in dataframe.columns:
+            self.perplexities = dataframe['perplexity'].astype(float).tolist()
+        else:
+            self.perplexities = [0.0] * len(self.codes)
+            logger.warning("[Dataset] 'perplexity' column missing. Using 0.0 (Feature disabled).")
 
-    def _extract_features(self, code):
+        logger.info(f"[Dataset] Extracting features for {len(self.codes)} samples...")
+        self.raw_features = []
+        
+        for idx, code in enumerate(tqdm(self.codes, desc="Extracting")):
+            self.raw_features.append(self._extract_features(code, idx))
+            
+        self.features_tensor = torch.stack(self.raw_features)
+        
+        if feature_stats is None:
+            self.mean = self.features_tensor.mean(dim=0)
+            self.std = self.features_tensor.std(dim=0) + 1e-6
+            self.stats = {'mean': self.mean, 'std': self.std}
+            logger.info(f"[Dataset] Computed Stats -> Mean: {self.mean[:2]}... | Std: {self.std[:2]}...")
+        else:
+            self.mean = feature_stats['mean']
+            self.std = feature_stats['std']
+            self.stats = feature_stats
+            logger.info(f"[Dataset] Using External Stats -> Mean: {self.mean[:2]}...")
+
+        # Applicazione Z-Score
+        self.features_tensor = (self.features_tensor - self.mean) / self.std
+
+    def _extract_features(self, code, idx):
         """
-        Estrae feature stilistiche NORMALIZZATE per evitare esplosioni.
-        Usa np.log1p per schiacciare i valori grandi.
+        Feature Stilometriche Agnostiche (Prof. Style) + Perplexity
         """
+        s_code = str(code)
+        if not s_code: s_code = " "
+        
         features = []
-        l_code = len(code) + 1.0
         
-        # 1. Log Length
-        features.append(math.log1p(l_code)) 
+        identifiers = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', s_code)
+        keywords = {"if", "else", "for", "while", "return", "int", "float", "def", "class", "void", "import", "from", "public", "private", "var", "const", "let", "function"}
+        identifiers = [x for x in identifiers if len(x) > 1 and x not in keywords]
         
-        # 2. Ratio Spazi
-        features.append(code.count(' ') / l_code)
+        if len(identifiers) == 0:
+            avg_id_len, id_entropy, snake_case_ratio, camel_case_ratio = 0.0, 0.0, 0.0, 0.0
+        else:
+            # 1. Lunghezza media
+            avg_id_len = sum(len(x) for x in identifiers) / len(identifiers)
+            
+            # 2. Entropia Caratteri
+            all_ids_str = "".join(identifiers)
+            counter = collections.Counter(all_ids_str)
+            total_chars = len(all_ids_str)
+            id_entropy = 0.0
+            if total_chars > 0:
+                for count in counter.values():
+                    p = count / total_chars
+                    id_entropy -= p * math.log2(p)
+            
+            # 3. Naming Mix
+            snake_case = sum(1 for x in identifiers if '_' in x)
+            camel_case = sum(1 for x in identifiers if '_' not in x and any(c.isupper() for c in x))
+            snake_case_ratio = snake_case / len(identifiers)
+            camel_case_ratio = camel_case / len(identifiers)
+
+        features.append(math.log1p(avg_id_len))
+        features.append(id_entropy)
+        features.append(snake_case_ratio)
+        features.append(camel_case_ratio)
+
+        # 4. Unique Token Ratio
+        tokens = s_code.split()
+        if len(tokens) == 0: unique_ratio = 0.0
+        else: unique_ratio = len(set(tokens)) / len(tokens)
+        features.append(unique_ratio)
+
+        # 5. Struttura Visiva
+        lines = s_code.split('\n')
+        num_lines = len(lines) + 1.0
+        empty_lines = sum(1 for line in lines if not line.strip())
+        features.append(empty_lines / num_lines)
         
-        # 3. Ratio Newlines
-        features.append(code.count('\n') / l_code)
+        # 6. Dirty Markers
+        dirty_markers = ["todo", "fix", "hack", "???", "!!!", "temp", "tmp"]
+        s_code_lower = s_code.lower()
+        dirty_count = sum(s_code_lower.count(m) for m in dirty_markers)
+        features.append(math.log1p(dirty_count))
         
-        # 4. Ratio Simboli Speciali
-        symbols = sum(code.count(c) for c in "{}[];,")
-        features.append(math.log1p(symbols) / math.log1p(l_code))
-        
-        # 5. Comment Density
-        comments = code.count('#') + code.count('//')
-        features.append(comments / (code.count('\n') + 1.0))
+        # 7. PERPLEXITY
+        ppl_val = self.perplexities[idx]
+        features.append(math.log1p(ppl_val))
 
         return torch.tensor(features, dtype=torch.float32)
 
@@ -83,116 +124,101 @@ class CodeDataset(Dataset):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        code = self.codes[idx]
-        label = self.labels[idx]
-        
-        # Data Augmentation solo in training
-        if self.is_train:
-            code = self._augment_code(code)
-            
-        # Tokenizzazione UniXcoder
         inputs = self.tokenizer(
-            code,
+            self.codes[idx],
             return_tensors=None, 
             max_length=self.max_length,
             truncation=True,
-            padding=False 
+            padding=False
         )
         
-        # Feature manuali
-        extra = self._extract_features(code)
-
         return {
             "input_ids": inputs["input_ids"],
             "attention_mask": inputs["attention_mask"],
-            "labels": label,
-            "extra_features": extra
+            "labels": self.labels[idx],
+            "language_labels": self.lang_ids[idx],
+            "extra_features": self.features_tensor[idx]
         }
 
-def load_data(config, tokenizer):
-    """
-    Carica e BILANCIA i dati usando i parametri dal config.
-    Versione Robustezza OOD + Debugging.
-    """
+# =============================================================================
+# 2. LOADING FUNCTION
+# =============================================================================
+def load_data_lolo(config, tokenizer, holdout_language=None):
     data_dir = config["data_dir"]
-    train_path = os.path.join(data_dir, "train.parquet")
-    val_path = os.path.join(data_dir, "validation.parquet")
-
-    logger.info(f"Loading raw data from {data_dir}...")
+    logger.info("Loading Dataframes...")
+    
     try:
-        train_df = pd.read_parquet(train_path)
-        val_df = pd.read_parquet(val_path)
-    except Exception as e:
-        logger.error(f"Errore caricamento dati: {e}")
-        raise e
-
-    logger.info(f"Train Rows Base: {len(train_df)}")
-    if 'language' in train_df.columns:
-        logger.info(f"Languages found in raw data: {train_df['language'].unique()}")
+        train_path = os.path.join(data_dir, "train_ppl.parquet")
+        val_path = os.path.join(data_dir, "validation_ppl.parquet")
         
-        # 1. NORMALIZZAZIONE
-        train_df['language'] = train_df['language'].astype(str).str.lower().str.strip()
+        if os.path.exists(train_path) and os.path.exists(val_path):
+            logger.info("Found pre-computed Perplexity files. Loading...")
+            df1 = pd.read_parquet(train_path)
+            df2 = pd.read_parquet(val_path)
+        else:
+            raise FileNotFoundError("PPL files not found.")
+    except (FileNotFoundError, Exception):
+        logger.warning("Perplexity files not found! Loading original files (Feature 8 will be 0).")
+        df1 = pd.read_parquet(os.path.join(data_dir, "train.parquet"))
+        df2 = pd.read_parquet(os.path.join(data_dir, "validation.parquet"))
+    
+    # Concatenazione Iniziale
+    full_df = pd.concat([df1, df2], ignore_index=True)
+
+    # Normalizzazione Linguaggi
+    full_df['language'] = full_df['language'].astype(str).str.lower().str.strip()
+    available_langs = sorted(full_df['language'].unique().tolist())
+    
+    # Mappa ID
+    lang2id = {lang: idx for idx, lang in enumerate(available_langs)}
+    logger.info(f"Language Map: {lang2id}")
+
+    # Logica LOLO
+    if holdout_language:
+        holdout_language = holdout_language.lower().strip()
+        if holdout_language not in available_langs:
+            raise ValueError(f"Holdout Language '{holdout_language}' not found in {available_langs}")
+            
+        logger.info(f"STRATEGIA LOLO: Holdout on {holdout_language}")
+        val_df = full_df[full_df['language'] == holdout_language].copy()
+
+        train_df = full_df[full_df['language'] != holdout_language].copy()
     else:
-        logger.error("CRITICAL: Colonna 'language' non trovata nel dataframe!")
-        raise KeyError("Column 'language' missing")
+        logger.warning("Split Random (Standard)")
+        from sklearn.model_selection import train_test_split
+        train_df, val_df = train_test_split(full_df, test_size=0.1, random_state=42, stratify=full_df['label'])
 
-    # --- STRATEGIA DI BILANCIAMENTO LINGUAGGI ---
+    # Data Balancing 
     if config.get("balance_languages", True):
-        target_size = config.get("target_size_per_language", 35000)
-        logger.info(f"Applying Language Balancing (Target per lang: {target_size})...")
-        
-        # Separiamo i linguaggi
-        df_py = train_df[train_df['language'] == 'python']
-        df_cpp = train_df[train_df['language'] == 'c++']
-        df_java = train_df[train_df['language'] == 'java']
-        
-        logger.info(f"Counts before balance -> Py: {len(df_py)}, C++: {len(df_cpp)}, Java: {len(df_java)}")
-                
-        # 1. Python (Maggioranza): Downsampling
-        if len(df_py) > target_size:
-            df_py_sample = df_py.sample(n=target_size, random_state=42)
-        else:
-            df_py_sample = df_py
-        
-        # 2. C++ (Minoranza): Upsampling con Replacement
-        if len(df_cpp) > 0:
-            df_cpp_sample = df_cpp.sample(n=target_size, replace=True, random_state=42)
-        else:
-            df_cpp_sample = df_cpp
+        target = config.get("target_size_per_language", 25000)
+        train_chunks = []
+        for lang in train_df['language'].unique():
+            lang_df = train_df[train_df['language'] == lang]
+            half = target // 2
             
-        # 3. Java (Minoranza): Upsampling con Replacement
-        if len(df_java) > 0:
-            df_java_sample = df_java.sample(n=target_size, replace=True, random_state=42)
-        else:
-            df_java_sample = df_java
-                
-        # Ricombiniamo
-        train_df = pd.concat([df_py_sample, df_cpp_sample, df_java_sample])
-        train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
+            for lbl in [0, 1]:
+                sub = lang_df[lang_df['label'] == lbl]
+                if len(sub) > 0:
+                    train_chunks.append(sub.sample(n=half, replace=(len(sub)<half), random_state=42))
         
-        logger.info(f"Balanced Train Size: {len(train_df)} rows")
-        if len(train_df) == 0:
-            raise ValueError("Il Dataset di training è VUOTO dopo il bilanciamento. Controlla i nomi dei linguaggi.")
-            
-        logger.info(f"New Language Dist:\n{train_df['language'].value_counts()}")
+        train_df = pd.concat(train_chunks).sample(frac=1, random_state=42).reset_index(drop=True)
 
-    # Estrazione Configurazione Augmentation
-    aug_config = config.get("augmentation", {})
-
+    # 1. Train (Calcola Stats)
     train_ds = CodeDataset(
         train_df, 
         tokenizer, 
+        lang2id, 
         max_length=config.get("max_length", 512), 
-        is_train=True,
-        aug_config=aug_config
+        feature_stats=None 
     )
     
+    # 2. Val (Usa Stats Train)
     val_ds = CodeDataset(
         val_df, 
         tokenizer, 
+        lang2id, 
         max_length=config.get("max_length", 512), 
-        is_train=False,
-        aug_config=None 
+        feature_stats=train_ds.stats 
     )
     
-    return train_ds, val_ds, None
+    return train_ds, val_ds, lang2id

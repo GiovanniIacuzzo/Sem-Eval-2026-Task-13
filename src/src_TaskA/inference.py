@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from sklearn.metrics import classification_report, f1_score
 
+# Assicurati che i percorsi di import siano corretti per il tuo progetto
 from src.src_TaskA.models.model import CodeClassifier
 from src.src_TaskA.dataset.dataset import CodeDataset
 from src.src_TaskA.utils.utils import set_seed 
@@ -20,7 +21,6 @@ from src.src_TaskA.utils.utils import set_seed
 # 1. Logging
 # -----------------------------------------------------------------------------
 warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
-
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 logging.basicConfig(
@@ -45,6 +45,7 @@ class InferenceCollate:
         
         # Gestione Extra Features
         extra_features = None
+        # Controlliamo se esistono le extra features nel primo elemento del batch
         if 'extra_features' in batch[0] and batch[0]['extra_features'] is not None:
             extra_features = torch.stack([item['extra_features'] for item in batch])
         
@@ -62,6 +63,9 @@ class InferenceCollate:
         }
 
 def load_model(config_path, checkpoint_path, device):
+    """
+    Carica il modello gestendo sia percorsi file (.bin) che cartelle.
+    """
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)["common"]
     
@@ -70,7 +74,17 @@ def load_model(config_path, checkpoint_path, device):
     logger.info(f"Loading weights from: {checkpoint_path}")
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
-        
+
+    # --- FIX: Gestione robusta path (Cartella o File) ---
+    if os.path.isdir(checkpoint_path):
+        # Se è una cartella, cerca model_state.bin
+        possible_path = os.path.join(checkpoint_path, "model_state.bin")
+        if os.path.exists(possible_path):
+            checkpoint_path = possible_path
+        else:
+            # Fallback per vecchi salvataggi o formati HF
+            checkpoint_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+    
     state_dict = torch.load(checkpoint_path, map_location=device)
     
     new_state_dict = {}
@@ -80,7 +94,7 @@ def load_model(config_path, checkpoint_path, device):
             
     try:
         model.load_state_dict(new_state_dict, strict=True)
-    except RuntimeError as e:
+    except RuntimeError:
         logger.warning(f"Strict loading failed, retrying with strict=False...")
         model.load_state_dict(new_state_dict, strict=False)
 
@@ -106,6 +120,8 @@ def run_inference(model, dataloader, device):
             
             outputs = model(input_ids, attention_mask, labels=labels, extra_features=extra_features)
             logits = outputs["logits"]
+            
+            # Argmax: 0 -> Human, 1 -> Machine
             preds = torch.argmax(logits, dim=1)
             
             all_preds.extend(preds.cpu().numpy())
@@ -143,6 +159,7 @@ def main():
     logger.info(f"Loading Test Data: {args.test_file}")
     df_test = pd.read_parquet(args.test_file)
     
+    # Importante: CodeDataset gestisce internamente la tokenizzazione e le feature
     test_ds = CodeDataset(
         df_test, 
         tokenizer, 
@@ -168,9 +185,12 @@ def main():
     logger.info("-" * 40)
     logger.info("GLOBAL RESULTS")
     logger.info("-" * 40)
-    print(classification_report(labels, preds, target_names=["Human", "AI"], digits=4))
     
-    # 5. Language Stats
+    # --- MODIFICA: Target names espliciti ---
+    # 0 -> human, 1 -> machine
+    print(classification_report(labels, preds, target_names=["human", "machine"], digits=4))
+    
+    # 5. Language Stats (Opzionale, utile per debug)
     if 'language' in df_test.columns:
         logger.info("-" * 40)
         logger.info("PER-LANGUAGE PERFORMANCE")
@@ -178,7 +198,8 @@ def main():
         df_test['pred'] = preds
         
         stats = []
-        for lang in df_test['language'].unique():
+        unique_langs = df_test['language'].unique()
+        for lang in unique_langs:
             subset = df_test[df_test['language'] == lang]
             if len(subset) > 0:
                 f1 = f1_score(subset['label'], subset['pred'], average='macro', zero_division=0)
@@ -187,11 +208,28 @@ def main():
         results_df = pd.DataFrame(stats).sort_values(by="F1 Macro", ascending=False)
         print(results_df.to_string(index=False))
 
-    # Save Errors
+    # Save Errors for analysis
+    # Aggiungiamo colonne leggibili
+    df_test['pred_label'] = ["machine" if p==1 else "human" for p in preds]
+    df_test['true_label'] = ["machine" if l==1 else "human" for l in labels]
+    
     errors_df = df_test[df_test['pred'] != df_test['label']]
     error_path = os.path.join(args.output_dir, "errors.csv")
-    errors_df.to_csv(error_path, index=False)
+    
+    # Salviamo solo colonne utili se esistono
+    cols_to_save = ['code', 'language', 'true_label', 'pred_label']
+    cols_to_save = [c for c in cols_to_save if c in errors_df.columns]
+    
+    errors_df[cols_to_save].to_csv(error_path, index=False)
     logger.info(f"Saved {len(errors_df)} errors to {error_path}")
 
 if __name__ == "__main__":
     main()
+
+
+"""
+python -m src.src_TaskA.inference \
+  --test_file data/Task_A/test_sample.parquet \
+  --checkpoint results/results_TaskA/checkpoints/best_model \
+  --config src/src_TaskA/config/config.yaml
+"""
