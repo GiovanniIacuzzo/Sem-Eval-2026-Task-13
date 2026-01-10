@@ -1,224 +1,206 @@
 import torch
-import pandas as pd
+import os
 import logging
 import math
-import os
 import re
-import collections
 import numpy as np
+import collections
+from typing import List, Dict, Optional
 from torch.utils.data import Dataset
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# 1. DATASET CLASS
+# 1. STYLOMETRIC ENGINE
 # =============================================================================
-class CodeDataset(Dataset):
-    def __init__(self, dataframe, tokenizer, lang2id, max_length=512, feature_stats=None):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.lang2id = lang2id
-        
-        dataframe = dataframe.reset_index(drop=True)
-        
-        self.codes = dataframe['code'].astype(str).tolist()
-        self.labels = dataframe['label'].astype(int).tolist()
-        self.languages = dataframe['language'].astype(str).tolist()
-        
-        self.lang_ids = [self.lang2id[l] if l in self.lang2id else -1 for l in self.languages]
+class StylometricEngine:
+    """
+    Language-Agnostic Feature Extraction Engine.
+    Computes entropy, consistency, and structural metrics to distinguish 
+    Human organic code from LLM synthetic code.
+    Used by extract_features.py and inference.py.
+    """
+    def __init__(self):
+        self.keywords = {
+            "def", "class", "return", "if", "else", "elif", "for", "while", "import", "from",
+            "try", "except", "finally", "with", "as", "pass", "break", "continue", "lambda",
+            "global", "nonlocal", "assert", "del", "yield", "raise", "print", "true", "false",
+            "none", "int", "float", "str", "bool", "list", "dict", "set", "tuple", "void", 
+            "public", "private", "protected", "static", "final", "const", "var", "let", 
+            "function", "package", "namespace", "using", "struct", "impl", "interface"
+        }
 
-        if 'perplexity' in dataframe.columns:
-            self.perplexities = dataframe['perplexity'].astype(float).tolist()
-        else:
-            self.perplexities = [0.0] * len(self.codes)
-            logger.warning("[Dataset] 'perplexity' column missing. Using 0.0 (Feature disabled).")
+    def process(self, code: str, perplexity: float) -> List[float]:
+        identifiers = self._extract_identifiers(code)
+        
+        # 1. Entropy & Naming
+        entropy = self._calculate_entropy(identifiers)
+        avg_len = sum(len(x) for x in identifiers) / len(identifiers) if identifiers else 0.0
+        
+        # 2. Consistency (Snake vs Camel)
+        snake_case = sum(1 for x in identifiers if '_' in x)
+        camel_case = sum(1 for x in identifiers if '_' not in x and any(c.isupper() for c in x))
+        total_style = snake_case + camel_case
+        mix_ratio = (min(snake_case, camel_case) / total_style) if total_style > 0 else 0.0
+        
+        # 3. Structural Irregularities
+        lines = code.split('\n')
+        empty_lines_var = self._get_empty_line_variance(lines)
+        
+        # 4. Dirty Code Indicators
+        code_lower = code.lower()
+        dirty_markers = ["todo", "fix", "hack", "tmp", "temp", "debug", "???", "!!!"]
+        dirty_score = sum(code_lower.count(m) for m in dirty_markers)
+        
+        # 5. Repetition (Type-Token Ratio)
+        tokens = re.findall(r'\b\w+\b', code_lower)
+        ttr = (len(set(tokens)) / len(tokens)) if tokens else 0.0
 
-        logger.info(f"[Dataset] Extracting features for {len(self.codes)} samples...")
-        self.raw_features = []
+        # Feature Vector Construction (10 Dimensions)
+        return [
+            perplexity,               # 0. Perplexity (External)
+            math.log1p(avg_len),      # 1. ID Length
+            entropy,                  # 2. ID Entropy
+            mix_ratio,                # 3. Style Inconsistency
+            math.log1p(dirty_score),  # 4. "Dirty" Comments
+            empty_lines_var,          # 5. Layout Variance
+            ttr,                      # 6. Repetition
+            float(len(lines)),        # 7. LOC
+            len(tokens) / (len(lines)+1) if len(lines) > 0 else 0, # 8. Density
+            math.log1p(total_style)   # 9. Variable Count
+        ]
+
+    def _extract_identifiers(self, code: str) -> List[str]:
+        candidates = re.findall(r'\b[a-zA-Z_]\w*\b', code)
+        return [c for c in candidates if c.lower() not in self.keywords and len(c) > 1]
+
+    def _calculate_entropy(self, identifiers: List[str]) -> float:
+        text = "".join(identifiers)
+        if not text: return 0.0
+        counts = collections.Counter(text)
+        total = len(text)
+        return -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+    def _get_empty_line_variance(self, lines: List[str]) -> float:
+        empty_indices = [i for i, line in enumerate(lines) if not line.strip()]
+        if len(empty_indices) < 2: return 0.0
+        diffs = np.diff(empty_indices)
+        return float(np.var(diffs))
+
+# =============================================================================
+# 2. VECTORIZED DATASET
+# =============================================================================
+class VectorizedDataset(Dataset):
+    """
+    Dataset wrapper efficiente per tensori pre-calcolati (.pt).
+    Usato SOLO da train.py.
+    """
+    def __init__(self, 
+                 data_dict: Dict[str, torch.Tensor], 
+                 feature_stats: Optional[Dict[str, torch.Tensor]] = None):
+        """
+        Args:
+            data_dict: Dizionario contenente 'embeddings', 'features', 'labels'.
+            feature_stats: Dizionario con 'mean' e 'std' calcolati sul training set.
+        """
+        self.embeddings = data_dict['embeddings'].float() # [N, 768]
+        self.features = data_dict['features'].float()     # [N, 10]
+        self.labels = data_dict['labels'].long()          # [N]
         
-        for idx, code in enumerate(tqdm(self.codes, desc="Extracting")):
-            self.raw_features.append(self._extract_features(code, idx))
-            
-        self.features_tensor = torch.stack(self.raw_features)
-        
+        # Normalizzazione Z-Score
         if feature_stats is None:
-            self.mean = self.features_tensor.mean(dim=0)
-            self.std = self.features_tensor.std(dim=0) + 1e-6
+            # Training Mode: Calcola statistiche
+            self.mean = self.features.mean(dim=0)
+            self.std = self.features.std(dim=0) + 1e-6 
             self.stats = {'mean': self.mean, 'std': self.std}
-            logger.info(f"[Dataset] Computed Stats -> Mean: {self.mean[:2]}... | Std: {self.std[:2]}...")
+            logger.info("Calculated Z-Score stats on Training Data.")
         else:
+            # Val/Test Mode: Usa statistiche fornite
             self.mean = feature_stats['mean']
             self.std = feature_stats['std']
             self.stats = feature_stats
-            logger.info(f"[Dataset] Using External Stats -> Mean: {self.mean[:2]}...")
-
-        # Applicazione Z-Score
-        self.features_tensor = (self.features_tensor - self.mean) / self.std
-
-    def _extract_features(self, code, idx):
-        """
-        Feature Stilometriche Agnostiche (Prof. Style) + Perplexity
-        """
-        s_code = str(code)
-        if not s_code: s_code = " "
-        
-        features = []
-        
-        identifiers = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', s_code)
-        keywords = {"if", "else", "for", "while", "return", "int", "float", "def", "class", "void", "import", "from", "public", "private", "var", "const", "let", "function"}
-        identifiers = [x for x in identifiers if len(x) > 1 and x not in keywords]
-        
-        if len(identifiers) == 0:
-            avg_id_len, id_entropy, snake_case_ratio, camel_case_ratio = 0.0, 0.0, 0.0, 0.0
-        else:
-            # 1. Lunghezza media
-            avg_id_len = sum(len(x) for x in identifiers) / len(identifiers)
+            # logger.info("Applied external Z-Score stats.")
             
-            # 2. Entropia Caratteri
-            all_ids_str = "".join(identifiers)
-            counter = collections.Counter(all_ids_str)
-            total_chars = len(all_ids_str)
-            id_entropy = 0.0
-            if total_chars > 0:
-                for count in counter.values():
-                    p = count / total_chars
-                    id_entropy -= p * math.log2(p)
-            
-            # 3. Naming Mix
-            snake_case = sum(1 for x in identifiers if '_' in x)
-            camel_case = sum(1 for x in identifiers if '_' not in x and any(c.isupper() for c in x))
-            snake_case_ratio = snake_case / len(identifiers)
-            camel_case_ratio = camel_case / len(identifiers)
-
-        features.append(math.log1p(avg_id_len))
-        features.append(id_entropy)
-        features.append(snake_case_ratio)
-        features.append(camel_case_ratio)
-
-        # 4. Unique Token Ratio
-        tokens = s_code.split()
-        if len(tokens) == 0: unique_ratio = 0.0
-        else: unique_ratio = len(set(tokens)) / len(tokens)
-        features.append(unique_ratio)
-
-        # 5. Struttura Visiva
-        lines = s_code.split('\n')
-        num_lines = len(lines) + 1.0
-        empty_lines = sum(1 for line in lines if not line.strip())
-        features.append(empty_lines / num_lines)
-        
-        # 6. Dirty Markers
-        dirty_markers = ["todo", "fix", "hack", "???", "!!!", "temp", "tmp"]
-        s_code_lower = s_code.lower()
-        dirty_count = sum(s_code_lower.count(m) for m in dirty_markers)
-        features.append(math.log1p(dirty_count))
-        
-        # 7. PERPLEXITY
-        ppl_val = self.perplexities[idx]
-        features.append(math.log1p(ppl_val))
-
-        return torch.tensor(features, dtype=torch.float32)
+        self.features = (self.features - self.mean) / self.std
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        inputs = self.tokenizer(
-            self.codes[idx],
-            return_tensors=None, 
-            max_length=self.max_length,
-            truncation=True,
-            padding=False
-        )
-        
         return {
-            "input_ids": inputs["input_ids"],
-            "attention_mask": inputs["attention_mask"],
-            "labels": self.labels[idx],
-            "language_labels": self.lang_ids[idx],
-            "extra_features": self.features_tensor[idx]
+            "semantic_embedding": self.embeddings[idx],
+            "structural_features": self.features[idx],
+            "labels": self.labels[idx]
         }
 
 # =============================================================================
-# 2. LOADING FUNCTION
+# 3. LOADING FUNCTION
 # =============================================================================
-def load_data_lolo(config, tokenizer, holdout_language=None):
-    data_dir = config["data_dir"]
-    logger.info("Loading Dataframes...")
+def load_vectorized_data(config: Dict, holdout_language: Optional[str] = None):
+    """
+    Carica i file .pt, unisce i dati e crea gli split Train/Val basati sulla logica LOLO.
+    """
+    data_dir = config.get("vector_data_dir", "data/Task_A/processed")
     
-    try:
-        train_path = os.path.join(data_dir, "train_ppl.parquet")
-        val_path = os.path.join(data_dir, "validation_ppl.parquet")
+    train_path = os.path.join(data_dir, "train_vectors.pt")
+    val_path = os.path.join(data_dir, "val_vectors.pt")
+    
+    if not os.path.exists(train_path) or not os.path.exists(val_path):
+        raise FileNotFoundError(f"Vector files not found in {data_dir}. Run extract_features.py first.")
+
+    logger.info(f"Loading vectors from {data_dir}...")
+    train_data = torch.load(train_path)
+    val_data = torch.load(val_path)
+    
+    # Merge dei dati
+    full_embeddings = torch.cat([train_data['embeddings'], val_data['embeddings']], dim=0)
+    full_features = torch.cat([train_data['features'], val_data['features']], dim=0)
+    full_labels = torch.cat([train_data['labels'], val_data['labels']], dim=0)
+    full_languages = np.concatenate([train_data['languages'], val_data['languages']], axis=0)
+    
+    total_samples = len(full_labels)
+    available_langs = np.unique(full_languages)
+    logger.info(f"Total Samples: {total_samples} | Languages Found: {available_langs}")
+
+    # Split Logic
+    if holdout_language:        
+        langs_lower = np.char.lower(full_languages.astype(str))
+        target_lower = holdout_language.lower().strip()
         
-        if os.path.exists(train_path) and os.path.exists(val_path):
-            logger.info("Found pre-computed Perplexity files. Loading...")
-            df1 = pd.read_parquet(train_path)
-            df2 = pd.read_parquet(val_path)
-        else:
-            raise FileNotFoundError("PPL files not found.")
-    except (FileNotFoundError, Exception):
-        logger.warning("Perplexity files not found! Loading original files (Feature 8 will be 0).")
-        df1 = pd.read_parquet(os.path.join(data_dir, "train.parquet"))
-        df2 = pd.read_parquet(os.path.join(data_dir, "validation.parquet"))
-    
-    # Concatenazione Iniziale
-    full_df = pd.concat([df1, df2], ignore_index=True)
-
-    # Normalizzazione Linguaggi
-    full_df['language'] = full_df['language'].astype(str).str.lower().str.strip()
-    available_langs = sorted(full_df['language'].unique().tolist())
-    
-    # Mappa ID
-    lang2id = {lang: idx for idx, lang in enumerate(available_langs)}
-    logger.info(f"Language Map: {lang2id}")
-
-    # Logica LOLO
-    if holdout_language:
-        holdout_language = holdout_language.lower().strip()
-        if holdout_language not in available_langs:
-            raise ValueError(f"Holdout Language '{holdout_language}' not found in {available_langs}")
-            
-        logger.info(f"STRATEGIA LOLO: Holdout on {holdout_language}")
-        val_df = full_df[full_df['language'] == holdout_language].copy()
-
-        train_df = full_df[full_df['language'] != holdout_language].copy()
+        if target_lower not in [l.lower() for l in available_langs]:
+             raise ValueError(f"Holdout language '{holdout_language}' not found in dataset.")
+        
+        logger.info(f"Applying LOLO Split: Holding out '{holdout_language}'")
+        val_mask = (langs_lower == target_lower)
+        train_mask = ~val_mask
     else:
-        logger.warning("Split Random (Standard)")
-        from sklearn.model_selection import train_test_split
-        train_df, val_df = train_test_split(full_df, test_size=0.1, random_state=42, stratify=full_df['label'])
-
-    # Data Balancing 
-    if config.get("balance_languages", True):
-        target = config.get("target_size_per_language", 25000)
-        train_chunks = []
-        for lang in train_df['language'].unique():
-            lang_df = train_df[train_df['language'] == lang]
-            half = target // 2
-            
-            for lbl in [0, 1]:
-                sub = lang_df[lang_df['label'] == lbl]
-                if len(sub) > 0:
-                    train_chunks.append(sub.sample(n=half, replace=(len(sub)<half), random_state=42))
+        logger.warning("No holdout language specified. Using random 90/10 split.")
+        indices = np.random.permutation(total_samples)
+        split_point = int(total_samples * 0.9)
+        train_indices = indices[:split_point]
+        val_indices = indices[split_point:]
         
-        train_df = pd.concat(train_chunks).sample(frac=1, random_state=42).reset_index(drop=True)
+        train_mask = np.zeros(total_samples, dtype=bool)
+        val_mask = np.zeros(total_samples, dtype=bool)
+        train_mask[train_indices] = True
+        val_mask[val_indices] = True
 
-    # 1. Train (Calcola Stats)
-    train_ds = CodeDataset(
-        train_df, 
-        tokenizer, 
-        lang2id, 
-        max_length=config.get("max_length", 512), 
-        feature_stats=None 
-    )
+    # Helper filter
+    def filter_data(mask):
+        mask_tensor = torch.tensor(mask, dtype=torch.bool)
+        return {
+            'embeddings': full_embeddings[mask_tensor],
+            'features': full_features[mask_tensor],
+            'labels': full_labels[mask_tensor]
+        }
     
-    # 2. Val (Usa Stats Train)
-    val_ds = CodeDataset(
-        val_df, 
-        tokenizer, 
-        lang2id, 
-        max_length=config.get("max_length", 512), 
-        feature_stats=train_ds.stats 
-    )
+    train_dict = filter_data(train_mask)
+    val_dict = filter_data(val_mask)
     
-    return train_ds, val_ds, lang2id
+    logger.info(f"Train Set Size: {len(train_dict['labels'])} | Val Set Size: {len(val_dict['labels'])}")
+
+    # Istanziazione
+    train_dataset = VectorizedDataset(train_dict, feature_stats=None)
+    val_dataset = VectorizedDataset(val_dict, feature_stats=train_dataset.stats)
+    
+    return train_dataset, val_dataset
