@@ -9,6 +9,7 @@ common:
   # PATHS
   # ---------------------------------------------------------------------------
   data_dir: "data/Task_A"
+  vector_data_dir: "data/Task_A/processed"
   checkpoint_dir: "results/results_TaskA/checkpoints"
   
   # ---------------------------------------------------------------------------
@@ -16,41 +17,23 @@ common:
   # ---------------------------------------------------------------------------
   model_name: "microsoft/unixcoder-base"
   num_labels: 2
-  max_length: 512
-  use_extra_features: true
   
-  # 1.LogLen, 2.Entropy, 3.SnakeRatio, 4.CamelRatio, 
-  # 5.TokenRatio, 6.EmptyLines, 7.DirtyMarkers, 8.Perplexity
-  extra_features_dim: 8       
-  
-  style_projection_dim: 64
-  
-  # ---------------------------------------------------------------------------
-  # LOSS LANDSCAPE & REGULARIZATION
-  # ---------------------------------------------------------------------------
-  supcon_temperature: 0.1
-  lambda_supcon: 0.4          
-  
-  # Adversarial Training (DANN):
-  lambda_adversarial: 0.01     
-  dropout_prob: 0.15          
-  
+  # Dimensioni Input
+  semantic_embedding_dim: 768
+  structural_feature_dim: 10
+    
   # ---------------------------------------------------------------------------
   # TRAINING HYPERPARAMETERS
-  # ---------------------------------------------------------------------------
-  batch_size: 32              
-  num_epochs: 6
-  learning_rate: 1.5e-5       
-  early_stop_patience: 3      
+  # ---------------------------------------------------------------------------  
+  batch_size: 128
+  num_epochs: 50
+  learning_rate: 1.0e-3
+  early_stop_patience: 10
+  
+  weight_decay: 0.01
   
   # ---------------------------------------------------------------------------
-  # DATA STRATEGY
+  # HARDWARE & REPRODUCIBILITY
   # ---------------------------------------------------------------------------
-  balance_languages: true
-  target_size_per_language: 25000 
-
-  # ---------------------------------------------------------------------------
-  # HARDWARE
-  # ---------------------------------------------------------------------------
-  num_workers: 4              
+  num_workers: 0 
   seed: 42
