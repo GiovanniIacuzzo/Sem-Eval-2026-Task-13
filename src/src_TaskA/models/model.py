@@ -1,33 +1,39 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict
 
 class HybridCodeClassifier(nn.Module):
     """
-    Lightweight Hybrid Classifier for Pre-Computed Vectors.
+    Balanced Hybrid Classifier.
     
     Architecture:
-    - Input A: Pre-computed Semantic Embeddings (from UniXcoder, dim 768)
-    - Input B: Stylometric Features (Manual Engineering, dim 10)
-    - Operation: Late Fusion (Concatenation) -> Deep MLP
-    
-    Note: This model does NOT load the Transformer backbone, ensuring ultra-fast training.
+    - Branch A (Semantic): Raw UniXcoder embedding (768 dim)
+    - Branch B (Style): Style Encoder (9 dim -> 128 dim)
+    - Fusion: Concatenation -> Deep MLP
     """
-    def __init__(self, config: Dict):
+    def __init__(self, semantic_dim: int = 768, feature_dim: int = 9, num_labels: int = 2):
         super().__init__()
         
-        # --- Dimensions ---
-        # Di default UniXcoder base ha 768, ma rendiamolo configurabile
-        self.semantic_dim = config.get("semantic_embedding_dim", 768) 
-        self.structural_dim = config.get("structural_feature_dim", 10)
-        self.num_labels = config.get("num_labels", 2)
+        # --- 1. Style Branch ---
+        # Proiettiamo le 9 feature in uno spazio a 128 dimensioni
+        self.style_encoder = nn.Sequential(
+            nn.Linear(feature_dim, 64),
+            nn.BatchNorm1d(64),
+            nn.Mish(),
+            nn.Dropout(0.1),
+            
+            nn.Linear(64, 128),
+            nn.BatchNorm1d(128),
+            nn.Mish()
+        )
         
-        fusion_dim = self.semantic_dim + self.structural_dim
+        # --- 2. Fusion Dimensions ---
+        # Ora concateniamo 768 (semantica) + 128 (stile upscalato)
+        style_out_dim = 128
+        fusion_dim = semantic_dim + style_out_dim
         
-        print(f"[Model] Init Hybrid MLP. Semantic: {self.semantic_dim} + Structural: {self.structural_dim} -> Fusion: {fusion_dim}")
+        print(f"[Model Init] Semantic: {semantic_dim} | Style: {feature_dim}->{style_out_dim} | Fusion Total: {fusion_dim}")
 
-        # --- MLP Architecture ---
+        # --- 3. Main Classifier ---
         self.classifier = nn.Sequential(
             nn.Linear(fusion_dim, 512),
             nn.BatchNorm1d(512),
@@ -39,32 +45,32 @@ class HybridCodeClassifier(nn.Module):
             nn.Mish(),
             nn.Dropout(0.2),
             
-            nn.Linear(128, self.num_labels)
+            nn.Linear(128, num_labels)
         )
         
         self._init_weights()
 
     def _init_weights(self):
-        """Xavier Initialization for better convergence."""
-        for m in self.classifier.modules():
+        for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, semantic_embedding, structural_features, labels=None, **kwargs):
+    def forward(self, semantic_embedding, structural_features, labels=None):
         """
         Args:
-            semantic_embedding: Tensor [Batch, 768] (Già calcolato offline)
-            structural_features: Tensor [Batch, 10] (Già calcolato offline)
-            labels: Tensor [Batch] (Opzionale)
+            semantic_embedding: [Batch, 768]
+            structural_features: [Batch, 9]
         """
         
-        # 1. Late Fusion
-        # Concatenazione diretta dei vettori
-        combined_features = torch.cat([semantic_embedding, structural_features], dim=1)
+        # 1. Processiamo le feature stilistiche separatamente
+        encoded_style = self.style_encoder(structural_features) # [Batch, 128]
         
-        # 2. Classification
+        # 2. Concatenazione Bilanciata
+        combined_features = torch.cat([semantic_embedding, encoded_style], dim=1)
+        
+        # 3. Classificazione
         logits = self.classifier(combined_features)
         
         loss = None

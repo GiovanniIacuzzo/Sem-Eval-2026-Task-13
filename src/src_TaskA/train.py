@@ -64,7 +64,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device, epo
         
         optimizer.zero_grad(set_to_none=True)
         
-        with autocast(device_type='cuda', dtype=torch.float16):
+        with autocast(device_type=device.type, dtype=torch.float16):
             outputs = model(
                 semantic_embedding=sem_emb,
                 structural_features=struct_feats,
@@ -94,12 +94,14 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="src/src_TaskA/config/config.yaml")    
     parser.add_argument("--holdout_language", type=str, default=None, 
                         help="LOLO Strategy: Language to exclude from training (e.g., 'Python')")
-    
+    parser.add_argument("--data_dir", type=str, default="data/Task_A/processed", 
+                        help="Directory containing the .pt files")
+
     args = parser.parse_args()
     
     ConsoleUX.print_banner("SemEval 2026 - Task A (Fast Vectorized Mode)")
     
-    # 1. Config
+    # 1. Config Loading
     if not os.path.exists(args.config):
         logger.error(f"Config file not found at {args.config}")
         sys.exit(1)
@@ -107,9 +109,11 @@ if __name__ == "__main__":
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)["common"]
         
+    config["vector_data_dir"] = args.data_dir
+        
     set_seed(config["seed"])
     
-    # 2. Comet ML
+    # 2. Comet ML Setup
     api_key = os.getenv("COMET_API_KEY")
     if api_key:
         experiment = Experiment(
@@ -117,19 +121,18 @@ if __name__ == "__main__":
             project_name=config.get("project_name", "semeval-task-a-ood"),
             auto_metric_logging=False
         )
-        experiment.set_name(f"FAST-LOLO-{args.holdout_language}" if args.holdout_language else "FAST-Std-Run")
+        exp_name = f"FAST-LOLO-{args.holdout_language}" if args.holdout_language else "FAST-Std-Run"
+        experiment.set_name(exp_name)
         experiment.log_parameters(config)
     else:
+        logger.warning("Comet API Key not found. Logging disabled.")
         experiment = None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using Device: {device}")
 
     # 3. Data Loading
-    train_dataset, val_dataset = load_vectorized_data(
-        config, 
-        holdout_language=args.holdout_language
-    )
+    train_dataset, val_dataset = load_vectorized_data(config)
     
     train_dl = DataLoader(
         train_dataset, 
@@ -145,17 +148,18 @@ if __name__ == "__main__":
         shuffle=False, 
         num_workers=0
     )
-
-    # 4. Model Init
-    # Ensure config matches extraction dimensions
-    config["semantic_embedding_dim"] = 768 # Standard UniXcoder
-    config["structural_feature_dim"] = 10  # Standard Style Engine
     
-    logger.info("Initializing Hybrid MLP...")
-    model = HybridCodeClassifier(config)
+    logger.info(f"Initializing Hybrid MLP (Sem: {config['semantic_embedding_dim']}, Struct: {config['structural_feature_dim']})...")
+    
+    # Passiamo argomenti specifici al costruttore del modello se necessario
+    model = HybridCodeClassifier(
+        semantic_dim=config["semantic_embedding_dim"],
+        feature_dim=config["structural_feature_dim"],
+        num_labels=2
+    )
     model.to(device)
     
-    # 5. Optimization
+    # 4. Optimization
     optimizer = AdamW(model.parameters(), lr=float(config["learning_rate"]), weight_decay=1e-2)
     scaler = GradScaler()
     
@@ -167,7 +171,7 @@ if __name__ == "__main__":
         pct_start=0.1
     )
 
-    # 6. Training Loop
+    # 5. Training Loop
     best_f1 = float("-inf")
     patience = config.get("early_stop_patience", 5)
     patience_counter = 0
@@ -187,13 +191,17 @@ if __name__ == "__main__":
         # --- VALIDATION ---
         val_metrics, val_report = evaluate_model(model, val_dl, device)
         
-        # Logging
+        # Logging Console
         ConsoleUX.log_metrics(f"Ep {epoch+1}", {**train_metrics, **val_metrics})
         
+        # Logging Comet
         if experiment:
             experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
             experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
-            if epoch % 5 == 0: logger.info(f"\n{val_report}")
+            # Loggare il report testuale ogni 5 epoche o alla fine
+            if (epoch + 1) % 5 == 0: 
+                logger.info(f"\n{val_report}")
+                experiment.log_text(val_report, step=epoch)
 
         # Checkpointing
         current_f1 = val_metrics["f1_macro"]
@@ -205,7 +213,7 @@ if __name__ == "__main__":
             patience_counter += 1
             
         if patience_counter >= patience:
-            logger.info("Early Stopping Triggered.")
+            logger.info(f"Early Stopping Triggered at Epoch {epoch+1}.")
             break
     
     if experiment:

@@ -20,7 +20,7 @@ common:
   
   # Dimensioni Input
   semantic_embedding_dim: 768
-  structural_feature_dim: 10
+  structural_feature_dim: 9
     
   # ---------------------------------------------------------------------------
   # TRAINING HYPERPARAMETERS

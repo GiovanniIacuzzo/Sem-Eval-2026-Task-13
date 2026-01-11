@@ -1,133 +1,60 @@
 import torch
-import numpy as np
-import logging
-from typing import Dict, Tuple
-from tqdm import tqdm
-from sklearn.metrics import (
-    accuracy_score, 
-    precision_recall_fscore_support, 
-    confusion_matrix, 
-    classification_report
-)
 import random
-import os
-from torch.amp import autocast
+import numpy as np
+from sklearn.metrics import accuracy_score, f1_score, classification_report
 
-logger = logging.getLogger(__name__)
-
-# =============================================================================
-# 1. UTILITIES DI BASE
-# =============================================================================
-class ConsoleUX:
-    @staticmethod
-    def print_banner(text):
-        print(f"\n{'-'*60}\n{text.center(60)}\n{'-'*60}")
-
-    @staticmethod
-    def log_metrics(stage, metrics):
-        log_str = f"[{stage}] "
-        keys = ["loss", "f1_macro", "accuracy"]
-        for k in keys:
-            if k in metrics:
-                log_str += f"{k}: {metrics[k]:.4f} | "
-        logger.info(log_str.strip(" | "))
-
-def set_seed(seed: int = 42):
+def set_seed(seed: int):
+    """Fissa il seed per la riproducibilità."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    logger.info(f"Global seed set to: {seed}")
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-# =============================================================================
-# 2. METRICHE & VALUTAZIONE
-# =============================================================================
-def compute_metrics(preds: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
-    accuracy = accuracy_score(labels, preds)
-    
-    p_macro, r_macro, f1_macro, _ = precision_recall_fscore_support(
-        labels, preds, average='macro', zero_division=0
-    )
-    
-    metrics = {
-        "accuracy": float(accuracy),
-        "f1_macro": float(f1_macro),
-        "precision_macro": float(p_macro),
-        "recall_macro": float(r_macro),
-    }
-    
-    if len(np.unique(labels)) <= 2:
-        try:
-            cm = confusion_matrix(labels, preds, labels=[0, 1])
-            tn, fp, fn, tp = cm.ravel()
-            metrics.update({"TN": int(tn), "FP": int(fp), "FN": int(fn), "TP": int(tp)})
-        except Exception:
-            pass 
-
-    return metrics
-
-def evaluate_model(
-    model: torch.nn.Module, 
-    dataloader: torch.utils.data.DataLoader, 
-    device: torch.device,
-    desc: str = "Evaluating"
-) -> Tuple[Dict[str, float], str]:
+def evaluate_model(model, dataloader, device):
+    """
+    Esegue l'inferenza sul validation set e calcola le metriche.
+    Ritorna:
+        - metrics (dict): {loss, accuracy, f1_macro}
+        - report (str): Classification report testuale
+    """
     model.eval()
+    loss_fct = torch.nn.CrossEntropyLoss()
     
-    loss_accum = 0.0
+    total_loss = 0.0
     all_preds = []
     all_labels = []
     
     with torch.no_grad():
-        progress_bar = tqdm(dataloader, desc=desc, leave=False, dynamic_ncols=True)
-        
-        for batch in progress_bar:
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+        for batch in dataloader:
+            sem_emb = batch["semantic_embedding"].to(device, non_blocking=True)
+            struct_feats = batch["structural_features"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
             
-            struct_feats = batch.get("structural_features", None)
-            if struct_feats is not None:
-                struct_feats = struct_feats.to(device, non_blocking=True)
+            outputs = model(sem_emb, struct_feats, labels)
             
-            with autocast(device_type='cuda', dtype=torch.float16):
-                outputs = model(
-                    input_ids=input_ids, 
-                    attention_mask=attention_mask, 
-                    structural_features=struct_feats,
-                    labels=labels
-                )
-                
-                loss = outputs["loss"]
-
-            loss_accum += loss.item()
+            loss = outputs["loss"]
+            total_loss += loss.item()
             
             logits = outputs["logits"]
             preds = torch.argmax(logits, dim=1)
             
-            all_preds.append(preds.detach().cpu())
-            all_labels.append(labels.detach().cpu())
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
             
-            if progress_bar.n % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{loss.item():.4f}"})
-
-    avg_loss = loss_accum / len(dataloader)
+    # Calcolo metriche
+    avg_loss = total_loss / len(dataloader)
+    acc = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average="macro")
     
-    np_preds = torch.cat(all_preds).numpy()
-    np_labels = torch.cat(all_labels).numpy()
+    metrics = {
+        "loss": avg_loss,
+        "accuracy": acc,
+        "f1_macro": f1
+    }
     
-    metrics = compute_metrics(np_preds, np_labels)
-    metrics["loss"] = avg_loss
+    # Report testuale
+    report = classification_report(all_labels, all_preds, target_names=["Human", "AI"], digits=4)
     
-    target_names = ["Human (0)", "AI (1)"]
-    try:
-        report_str = classification_report(
-            np_labels, np_preds, target_names=target_names, digits=4, zero_division=0
-        )
-    except Exception as e:
-        report_str = f"Classification Report Error: {e}"
-    
-    return metrics, report_str
+    return metrics, report
