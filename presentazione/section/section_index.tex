@@ -1,0 +1,59 @@
+{
+
+    \setbeamercolor{background canvas}{bg=PaperWhite}
+    \setbeamercolor{normal text}{fg=Obsidian}
+    \usebeamercolor[fg]{normal text}
+    \hypersetup{linkcolor=Obsidian}
+
+    \setbeamertemplate{section in toc}{
+        \begin{tikzpicture}[baseline={([yshift=-.6ex]current bounding box.center)}]
+            
+            \node[
+                circle, 
+                fill=VividViolet,
+                text=white,
+                font=\bfseries\scriptsize, 
+                inner sep=3.5pt,
+                drop shadow={opacity=0.2, shadow xshift=1pt, shadow yshift=-1pt}
+            ] (num) {\inserttocsectionnumber};
+            
+            \node[
+                right=0.3cm of num, 
+                font=\Large\bfseries, 
+                anchor=west,
+                text=Obsidian
+            ] (txt) {\inserttocsection}; 
+            
+        \end{tikzpicture}
+        \par\vspace{0.7cm}
+    }
+
+    \begin{frame}[plain]
+        
+        \begin{tikzpicture}[remember picture, overlay]
+            
+            \node[anchor=north west] at ([xshift=1.2cm, yshift=-1.0cm]current page.north west) {
+                \fontsize{36}{40}\selectfont \bfseries \textcolor{Obsidian}{Roadmap}
+            };
+            
+            \node[anchor=north west] at ([xshift=1.2cm, yshift=-2.4cm]current page.north west) {
+                    \begin{tikzpicture}
+                        \fill[VividViolet] (0,0) rectangle (1.5, 0.06);
+                        \fill[gray!20] (1.6,0) rectangle (10, 0.06);
+                    \end{tikzpicture}
+            };
+            
+            \node[anchor=south east, opacity=0.05] at ([xshift=-0.5cm, yshift=0.5cm]current page.south east) {
+                    \scalebox{6}{\textcolor{Obsidian}{\faListUl}}
+            };
+    
+        \end{tikzpicture}
+    
+        \vspace{3cm} 
+    
+        % Stampa l'indice
+        \tableofcontents
+        
+    \end{frame}
+
+}

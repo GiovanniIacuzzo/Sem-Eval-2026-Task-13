@@ -1,0 +1,112 @@
+\documentclass[10pt, aspectratio=169]{beamer}
+
+\DeclareFontShape{T1}{cmss}{b}{n}{<->ssub*cmss/bx/n}{}
+
+% --- Pacchetti ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[italian]{babel}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{calc, backgrounds, shadings, shadows.blur, positioning, fadings, patterns, shapes.geometric}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{fontawesome5} 
+\usepackage{caption}
+\usepackage[most]{tcolorbox}
+\usepackage{microtype} 
+\usepackage{hyperref} 
+
+% --- 1. DEFINIZIONE COLORI ---
+\definecolor{Obsidian}{HTML}{08080A}      % Sfondo scuro
+\definecolor{Charcoal}{HTML}{121214}      % Grigio scuro
+\definecolor{PaperWhite}{HTML}{FFFFFF}    % Bianco
+\definecolor{DarkText}{HTML}{1A1A1A}      % Testo scuro
+
+% Accenti "Deep Tech"
+\definecolor{VividViolet}{HTML}{7F00FF}   % Viola Puro
+\definecolor{ElectricPurple}{HTML}{8A2BE2} 
+\definecolor{CyanGlow}{HTML}{00F0FF}      % Ciano Cyber
+\definecolor{NeonPurple}{HTML}{9B30FF}    
+\definecolor{DeepViolet}{HTML}{450580}
+\definecolor{ElectricBlue}{HTML}{007BFF}
+
+% --- 2. OTTIMIZZAZIONE FULL SCREEN ---
+\hypersetup{
+    pdfpagemode=FullScreen,
+    pdftitle={SemEval-2026 Task 13},
+    pdfauthor={Giovanni Giuseppe Iacuzzo},
+    colorlinks=true,
+    linkcolor=white,
+    urlcolor=CyanGlow 
+}
+
+% --- 3. FONT ---
+\usepackage[default]{lato} 
+
+% --- 4. MARGINI ---
+\setbeamersize{text margin left=1.2cm, text margin right=1.2cm} 
+
+% --- 5. SETUP BEAMER ---
+\setbeamercolor{background canvas}{bg=PaperWhite}
+\setbeamercolor{normal text}{fg=DarkText}
+\setbeamercolor{frametitle}{fg=Obsidian}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{headline}{}
+\setbeamertemplate{footline}{}
+
+% --- 6. HEADER PULITO ---
+\setbeamertemplate{frametitle}{
+    \vspace{0.6cm}
+    \begin{beamercolorbox}[wd=\paperwidth, left]{frametitle}
+        \hspace{1.2cm} 
+        {\fontseries{b}\selectfont \Large \insertframetitle}
+        \par\vspace{0.15cm}
+        \hspace{1.2cm}
+        \begin{tikzpicture}
+            \fill[VividViolet] (0,0) rectangle (1.5, 0.08);
+        \end{tikzpicture}
+    \end{beamercolorbox}
+}
+
+% Footer minimale
+\setbeamertemplate{footline}{
+    \begin{tikzpicture}[remember picture, overlay]
+        \node[anchor=south east, xshift=-0.8cm, yshift=0.5cm, text=gray!40] at (current page.south east) {\footnotesize \fontseries{l}\selectfont \insertframenumber};
+    \end{tikzpicture}
+}
+
+% --- 7. STILE CODICE ---
+\lstset{
+    basicstyle=\ttfamily\small\color{DarkText},
+    backgroundcolor=\color{gray!5},
+    keywordstyle=\color{VividViolet}\bfseries,
+    stringstyle=\color{gray!60},
+    commentstyle=\color{gray!50}\itshape,
+    numberstyle=\tiny\color{gray!30},
+    numbers=left, frame=none, 
+    aboveskip=1em, belowskip=1em, xleftmargin=15pt, breaklines=true
+}
+
+% --- 8. SLIDE TITOLO ---
+\input{section/title.tex}
+
+% --- DOCUMENTO ---
+\begin{document}
+
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+% ROADMAP
+\input{section/section_index.tex}
+
+% --- INCLUSIONE SEZIONI ---
+\input{section/section_1.tex}
+\input{section/section_2.tex}
+\input{section/section_3.tex}
+\input{section/section_4.tex}
+\input{section/section_5.tex}
+
+\end{document}

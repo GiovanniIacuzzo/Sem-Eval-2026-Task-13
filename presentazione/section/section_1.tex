@@ -1,0 +1,204 @@
+% --- SEZIONE 1: CONTESTO E OBIETTIVI ---
+\section{Introduzione e Obiettivi}
+
+% ---------------------------------------------------
+% SLIDE 1: IL CONTESTO
+% ---------------------------------------------------
+\begin{frame}{Il Nuovo Paradigma: GenAI Code}
+    \vspace{0.2cm}
+    
+    % Contenitore superiore
+    \begin{tcolorbox}[
+        colback=white, colframe=Obsidian, 
+        title=\textbf{\faExclamationTriangle \ \ The Rise of LLMs},
+        fonttitle=\bfseries\normalsize, coltitle=white,
+        enhanced, attach boxed title to top left={xshift=0.5cm, yshift=-2mm},
+        boxed title style={colback=VividViolet, sharp corners},
+        boxrule=0.5pt, drop fuzzy shadow
+    ]
+        L'evoluzione di modelli come \textbf{GPT-4, Llama-3 e StarCoder} ha reso il codice sintetico indistinguibile da quello umano. Questo fenomeno introduce rischi critici per la \textbf{sicurezza software}, il \textbf{copyright} e l'integrità dei sistemi.
+    \end{tcolorbox}
+    
+    \vspace{0.3cm}
+
+    % Visualizzazione Concettuale
+    \begin{center}
+    \begin{tikzpicture}
+        % 1. Nodo Umano
+        \node[align=center] (human) at (0,0) {
+            \color{Obsidian}\Huge\faUser\\
+            \small\textbf{Human Code}\\
+            \scriptsize(Creativity, Bugs)}
+        ;
+        
+        % 2. Nodo AI
+        \node[align=center] (ai) at (8,0) {
+            \color{NeonPurple}\Huge\faRobot\\
+            \small\textbf{GenAI Code}\\
+            \scriptsize(Speed, Patterns)}
+        ;
+        
+        % 3. Freccia "Indistinguishable"
+        \onslide<2->{
+            \draw[->, line width=2pt, draw=gray!30] (human) -- (ai) node[midway, above] {\color{DarkText}\textbf{Indistinguishable?}};
+        }
+        
+        % 4. Box Soluzione
+        \onslide<3->{
+            \node[draw=NeonPurple, fill=white, rounded corners, inner sep=10pt, drop shadow] at (4, -1.5) {
+                \begin{minipage}{0.6\textwidth}
+                    \centering
+                    \color{VividViolet}\textbf{SemEval-2026 Task 13}\\
+                    \color{gray}\scriptsize Detect $\cdot$ Attribute $\cdot$ Analyze
+                \end{minipage}
+            };
+        }
+    \end{tikzpicture}
+    \end{center}
+\end{frame}
+
+% ---------------------------------------------------
+% SLIDE 2: LE 3 SFIDE CHIAVE
+% ---------------------------------------------------
+\begin{frame}{Obiettivi della Competizione}
+    \vspace{0.1cm}
+    La Task 13 risponde a tre esigenze fondamentali dell'industria moderna:
+    \vspace{0.3cm}
+    
+    \begin{columns}[t, onlytextwidth]
+        
+        % CARD 1: SECURITY
+        \column{0.32\textwidth}
+        \onslide<1->{
+            \begin{tcolorbox}[
+                enhanced, colback=white, colframe=gray!10, 
+                coltitle=Obsidian, title=\centering\Large\faLock, 
+                fonttitle=\bfseries, arc=5pt,
+                borderline={0pt}{0pt}{white},
+                shadow={2mm}{-2mm}{0mm}{black!5},
+                top=5pt
+            ]
+                \centering
+                \textbf{\color{VividViolet}Sicurezza}\\
+                \vspace{0.2cm}
+                \scriptsize
+                Prevenire vulnerabilità introdotte da codice generato (Hallucinations) in sistemi critici.
+            \end{tcolorbox}
+        }
+
+        % CARD 2: ATTRIBUTION
+        \column{0.32\textwidth}
+        \onslide<2->{
+            \begin{tcolorbox}[
+                enhanced, colback=white, colframe=gray!10, 
+                coltitle=Obsidian, title=\centering\Large\faCopyright,
+                fonttitle=\bfseries, arc=5pt,
+                borderline={0pt}{0pt}{white},
+                shadow={2mm}{-2mm}{0mm}{black!5},
+                top=5pt
+            ]
+                \centering
+                \textbf{\color{VividViolet}Attribuzione}\\
+                \vspace{0.2cm}
+                \scriptsize
+                Identificare il modello specifico (es. Llama vs OpenAI) per licensing e proprietà intellettuale.
+            \end{tcolorbox}
+        }
+
+        % CARD 3: HYBRID ANALYSIS
+        \column{0.32\textwidth}
+        \onslide<3->{
+            \begin{tcolorbox}[
+                enhanced, colback=white, colframe=gray!10, 
+                coltitle=Obsidian, title=\centering\Large\faCodeBranch,
+                fonttitle=\bfseries, arc=5pt,
+                borderline={0pt}{0pt}{white},
+                shadow={2mm}{-2mm}{0mm}{black!5},
+                top=5pt
+            ]
+                \centering
+                \textbf{\color{VividViolet}Analisi Ibrida}\\
+                \vspace{0.2cm}
+                \scriptsize
+                Gestire scenari complessi: codice misto Uomo-AI, Refactoring e Codice Avversario.
+            \end{tcolorbox}
+        }
+
+    \end{columns}
+\end{frame}
+
+% ---------------------------------------------------
+% SLIDE 3: STRUTTURA DEI SUBTASKS
+% ---------------------------------------------------
+\begin{frame}{Struttura del Progetto: I 3 Moduli}
+    
+    \vspace{0.1cm}
+    Una pipeline unificata per affrontare i tre livelli di complessità del task:
+    \vspace{0.2cm}
+
+    % SUBTASK A
+    \onslide<1->{
+        \begin{tcolorbox}[
+            enhanced, colback=white, 
+            frame style={left color=VividViolet, right color=NeonPurple},
+            coltitle=white, title=\textbf{Subtask A $\cdot$ Binary Detection},
+            fonttitle=\bfseries\scriptsize, 
+            leftrule=4mm, boxrule=0pt, arc=2pt,
+            drop fuzzy shadow,
+            top=2pt, bottom=2pt
+        ]
+            \begin{columns}
+                \column{0.08\textwidth} \centering \color{white}\faAdjust
+                \column{0.92\textwidth} 
+                \scriptsize 
+                \textbf{Human vs Machine.} \\
+                Classificazione binaria su 500K sample. Include scenari \textit{Unseen Languages} (es. Go, PHP) e \textit{Unseen Domains}.
+            \end{columns}
+        \end{tcolorbox}
+    }
+    \vspace{0.05cm}
+
+    % SUBTASK B
+    \onslide<2->{
+        \begin{tcolorbox}[
+            enhanced, colback=white, 
+            frame style={left color=Obsidian, right color=Charcoal},
+            coltitle=white, title=\textbf{Subtask B $\cdot$ Attribution},
+            fonttitle=\bfseries\scriptsize, 
+            leftrule=4mm, boxrule=0pt, arc=2pt,
+            drop fuzzy shadow,
+            top=2pt, bottom=2pt
+        ]
+            \begin{columns}
+                \column{0.08\textwidth} \centering \color{white}\faFingerprint
+                \column{0.92\textwidth} 
+                \scriptsize 
+                \textbf{Multi-Class (11 Families).} \\
+                Identificazione fine-grained dell'autore (Human, GPT, Llama, Mistral, ecc.). Sfida: Forti sbilanciamenti di classe.
+            \end{columns}
+        \end{tcolorbox}
+    }
+    \vspace{0.05cm}
+
+    % SUBTASK C
+    \onslide<3->{
+        \begin{tcolorbox}[
+            enhanced, colback=white, 
+            frame style={left color=CyanGlow!80!blue, right color=CyanGlow},
+            coltitle=white, title=\textbf{Subtask C $\cdot$ Hybrid Analysis},
+            fonttitle=\bfseries\scriptsize, 
+            leftrule=4mm, boxrule=0pt, arc=2pt,
+            drop fuzzy shadow,
+            top=2pt, bottom=2pt
+        ]
+            \begin{columns}
+                \column{0.08\textwidth} \centering \color{white}\faRandom
+                \column{0.92\textwidth} 
+                \scriptsize 
+                \textbf{Mixed \& Adversarial (4 Classi).} \\
+                Classificazione complessa: Human, Machine, Hybrid (Mixed) e Adversarial (Codice offuscato). 900K sample.
+            \end{columns}
+        \end{tcolorbox}
+    }
+
+\end{frame}

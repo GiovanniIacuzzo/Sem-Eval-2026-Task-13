@@ -1,0 +1,489 @@
+% --- SEZIONE 2 ---
+\section{Architecture dei modelli}
+
+% ---------------------------------------------------
+% SUBTASK A
+% ---------------------------------------------------
+
+% ---------------------------------------------------
+% SLIDE 1: OVERVIEW PROCEDURALE
+% ---------------------------------------------------
+\begin{frame}{Subtask A: Hybrid Forensics Pipeline}
+    \vspace{-0.3cm}
+    L'architettura proposta combina la potenza degli LLM con tecniche di analisi forense classica tramite una strategia di \textbf{Late Fusion}.
+    \vspace{0.1cm}
+
+    % DIAGRAMMA DI FLUSSO
+    \begin{center}
+    \begin{tikzpicture}[node distance=1.2cm, auto, thick, scale=0.85, transform shape]
+        \tikzstyle{block} = [rectangle, draw=none, fill=white, drop shadow, 
+                             text width=2.2cm, text centered, rounded corners, minimum height=1.3cm, 
+                             font=\sffamily\scriptsize\bfseries] 
+        \tikzstyle{line} = [draw, -latex, very thick, color=gray!40]
+
+        % Nodi
+        \node [block, fill=Obsidian, text=white] (input) {\faCode\\ Input Snippet};
+        
+        \node [block, fill=white, text=DeepViolet, above right=0.2cm and 0.4cm of input] (sem) {\faBrain\\ Semantic\\ (UniXcoder)};
+        \node [block, fill=white, text=DeepViolet, right=0.4cm of input] (ppl) {\faMicrochip\\ AI-Surprise\\ (Qwen-2.5 PPL)};
+        \node [block, fill=white, text=DeepViolet, below right=0.2cm and 0.4cm of input] (style) {\faSearch\\ Forensics\\ (16 Features)};
+
+        \node [block, fill=CyanGlow!10, text=Obsidian, right=3.5cm of input, text width=1.8cm] (fusion) {\faLayerGroup\\ Late Fusion\\ (Concat)};
+        
+        \node [block, fill=VividViolet, text=white, right=0.6cm of fusion] (out) {\faCheckCircle\\ XGBoost\\ Classification};
+
+        % Connessioni
+        \draw [line] (input) -- (sem.west);
+        \draw [line] (input) -- (ppl.west);
+        \draw [line] (input) -- (style.west);
+        
+        \draw [line] (sem.east) -- (fusion.west);
+        \draw [line] (ppl.east) -- (fusion.west);
+        \draw [line] (style.east) -- (fusion.west);
+        
+        \draw [line] (fusion.east) -- (out.west);
+    \end{tikzpicture}
+    \end{center}
+    
+    \vspace{0.1cm}
+    \begin{tcolorbox}[colback=white, colframe=gray!20, boxrule=0.5pt, sharp corners, left=2pt, right=2pt, top=1pt, bottom=1pt]
+        \centering \scriptsize
+        \textbf{Rationale:} Gli LLM lasciano tracce statistiche ("Surprise") e stilistiche (Forensics) diverse, che i modelli semantici puri (UniXcoder) potrebbero ignorare.
+    \end{tcolorbox}
+\end{frame}
+
+% ---------------------------------------------------
+% SLIDE 2: FEATURE ENGINEERING
+% ---------------------------------------------------
+\begin{frame}{1. AI-Surprise \& Stylometric Forensics}
+    \vspace{-0.3cm} 
+    
+    \begin{columns}[t, onlytextwidth]
+        
+        % COLONNA SINISTRA: PERPLEXITY
+        \column{0.49\textwidth}
+        \begin{tcolorbox}[
+            enhanced, title=\textbf{\faMicrochip \ \ Perplexity Engine},
+            colframe=Obsidian, colback=white, coltitle=white,
+            boxed title style={colback=VividViolet},
+            attach boxed title to top left={xshift=2mm, yshift=-2mm},
+            boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+            top=3pt, bottom=3pt
+        ]
+            \footnotesize
+            Utilizziamo \textbf{Qwen2.5-Coder-1.5B} per calcolare quanto il modello è "sorpreso" dal codice.
+            \vspace{0.1cm}
+            \begin{itemize} \setlength\itemsep{0pt}
+                \item \textbf{Ipotesi:} Il codice generato da AI ha una Perplexity (PPL) inferiore rispetto a quello umano.
+                \item \textbf{Implementazione:} 
+                \begin{itemize} \scriptsize \setlength\itemsep{0pt}
+                    \item Sliding Window Processing.
+                    \item OOM Auto-Recovery (Dynamic Batching).
+                    \item Feature: \texttt{cross\_entropy\_loss}.
+                \end{itemize}
+            \end{itemize}
+        \end{tcolorbox}
+
+        % COLONNA DESTRA: STYLOMETRY
+        \column{0.49\textwidth}
+        \begin{tcolorbox}[
+            enhanced, title=\textbf{\faSearch \ \ Forensic Features (16 dim)},
+            colframe=Obsidian, colback=white, coltitle=white,
+            boxed title style={colback=CyanGlow!80!blue},
+            attach boxed title to top left={xshift=2mm, yshift=-2mm},
+            boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+            top=3pt, bottom=3pt
+        ]
+            \footnotesize
+            Estrazione di pattern stilistici tramite Regex:
+            \vspace{0.1cm}
+            \begin{itemize} \setlength\itemsep{0pt}
+                \item \textbf{Entropy \& TTR:} Complessità lessicale.
+                \item \textbf{Naming Inconsistency:} Mix di \texttt{snake\_case} e \texttt{camelCase} (tipico umano).
+                \item \textbf{Layout:} Spazi bianchi e indentazione.
+                \item \textbf{Identifiers:} Entropia nomi variabili.
+            \end{itemize}
+        \end{tcolorbox}
+    \end{columns}
+\end{frame}
+
+% ---------------------------------------------------
+% SLIDE 3: SEMANTICS & FUSION
+% ---------------------------------------------------
+\begin{frame}{2. Semantic Backbone \& Late Fusion}
+    
+    \vspace{-0.3cm} 
+    
+    % BLOCCO UNIXCODER
+    \begin{tcolorbox}[
+        enhanced, colback=gray!5, frame hidden, 
+        leftrule=3pt, colframe=VividViolet,
+        title=\textbf{\faBrain \ \ Semantic Encoding (Microsoft UniXcoder)},
+        fonttitle=\bfseries\small, coltitle=Obsidian,
+        detach title, 
+        before upper={\textbf{\faBrain \ \ Semantic Encoding (Microsoft UniXcoder)}\par\vspace{0.05cm}},
+        top=1pt, bottom=1pt
+    ]
+        \footnotesize
+        Per catturare la logica del codice, utilizziamo \textbf{UniXcoder-base}.
+        \begin{itemize} \setlength\itemsep{0pt}
+            \item \textbf{Processo:} Input (512 token) $\to$ Forward Pass $\to$ Mean Pooling.
+            \item \textbf{Output:} Vettore denso a \textbf{768 dimensioni}.
+        \end{itemize}
+    \end{tcolorbox}
+
+    \vspace{0.1cm}
+    
+    % BLOCCO FUSION & XGBOOST
+    \begin{tcolorbox}[
+        enhanced, colback=white, 
+        frame style={left color=Obsidian, right color=Charcoal},
+        title=\textbf{\faProjectDiagram \ \ Late Fusion \& XGBoost},
+        fonttitle=\bfseries\small, coltitle=white,
+        boxrule=0pt, drop fuzzy shadow, arc=4pt,
+        top=3pt, bottom=3pt
+    ]
+        \begin{columns}
+            \column{0.20\textwidth}
+            \centering
+            \begin{tikzpicture}[scale=0.65, transform shape]
+                \fill[VividViolet] (0,0) rectangle (0.8, 1.8) node[midway, rotate=90, white, font=\sffamily\scriptsize\bfseries] {Emb (768)};
+                \fill[CyanGlow] (0.9,0) rectangle (1.2, 1.8) node[midway, rotate=90, black, font=\sffamily\scriptsize\bfseries] {Style};
+                \node[font=\sffamily] at (0.6, -0.4) {\tiny Concat};
+            \end{tikzpicture}
+            
+            \column{0.80\textwidth}
+            \footnotesize
+            Le feature vengono concatenate in un unico vettore \textbf{[784 dim]}:
+            \[ V_{final} = \text{Concat}(\mathbf{E}_{sem}, \mathbf{F}_{style}, \mathbf{P}_{ppl}) \]
+            
+            \textbf{Perché XGBoost?}
+            \begin{itemize} \setlength\itemsep{0pt}
+                \item Gestisce bene dati eterogenei (Dense + Sparse).
+                \item \textbf{Feature Importance:} Conferma che \textit{Perplexity} e \textit{Entropy} sono discriminatori chiave.
+                \item Training con \textbf{Early Stopping}.
+            \end{itemize}
+        \end{columns}
+    \end{tcolorbox}
+
+\end{frame}
+
+% ---------------------------------------------------
+% SUBTASK B
+% ---------------------------------------------------
+
+% ---------------------------------------------------
+% SLIDE 1: LA SFIDA
+% ---------------------------------------------------
+\begin{frame}{Subtask B: The Attribution Challenge}
+    \vspace{-0.3cm}
+    A differenza del task binario, qui l'obiettivo è identificare l'\textbf{esatta famiglia} del modello (Fine-Grained Classification) in uno scenario fortemente sbilanciato.
+    \vspace{0.1cm}
+
+    \begin{columns}[t, onlytextwidth]
+        % COLONNA SX: DEFINIZIONE PROBLEMA
+        \column{0.48\textwidth}
+        \begin{tcolorbox}[
+            enhanced, title=\textbf{\faFingerprint \ \ 11 Target Classes},
+            colframe=Obsidian, colback=white, coltitle=white,
+            boxed title style={colback=VividViolet},
+            boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+            top=3pt, bottom=3pt
+        ]
+            \footnotesize
+            Il modello deve distinguere tra:
+            \begin{itemize} \setlength\itemsep{0pt}
+                \item \textbf{1 Classe Umana} (Dominante).
+                \item \textbf{10 Famiglie AI:} GPT-4, Llama-3, StarCoder, Mistral, Qwen, DeepSeek, ecc.
+            \end{itemize}
+            
+            \vspace{0.1cm}
+            \textbf{Key Challenges:}
+            \begin{itemize} \setlength\itemsep{0pt} \scriptsize
+                \item \textbf{Extreme Imbalance:} Human >>> AI (442k vs 2k-10k).
+                \item \textbf{OOD Detection:} Gestire modelli "Unseen" nel test set.
+            \end{itemize}
+        \end{tcolorbox}
+
+        % COLONNA DX: GRAFICO SBILANCIAMENTO
+        \column{0.48\textwidth}
+        \begin{tcolorbox}[
+            enhanced, title=\textbf{\faBalanceScale \ \ Data Distribution},
+            colframe=Obsidian, colback=gray!5, coltitle=white,
+            boxed title style={colback=Charcoal},
+            boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+            top=3pt, bottom=3pt
+        ]
+            \centering
+            \begin{tikzpicture}[scale=0.6, transform shape, font=\sffamily]
+                % Human Bar
+                \draw[fill=Obsidian] (0,0) rectangle (1.5, 4.5);
+                \node[rotate=90, white, font=\sffamily\bfseries] at (0.75, 2.25) {HUMAN (90\%)};
+                
+                % AI Bars
+                \draw[fill=VividViolet] (2,0) rectangle (2.5, 0.8);
+                \draw[fill=CyanGlow] (2.7,0) rectangle (3.2, 0.6);
+                \draw[fill=VividViolet] (3.4,0) rectangle (3.9, 0.4);
+                \draw[fill=CyanGlow] (4.1,0) rectangle (4.6, 0.9);
+                
+                \node[font=\sffamily\bfseries] at (3.3, 1.2) {AI Models};
+                \node[align=center, font=\sffamily\tiny] at (3.3, -0.5) {GPT, Llama,\\Mistral...};
+            \end{tikzpicture}
+            
+            \vspace{0.1cm}
+            \scriptsize
+            \textit{Approccio diretto $\to$ Bias verso "Human".\\ Soluzione: \textbf{Cascade Inference}.}
+        \end{tcolorbox}
+    \end{columns}
+\end{frame}
+
+% ---------------------------------------------------
+% SLIDE 2: CASCADE INFERENCE
+% ---------------------------------------------------
+\begin{frame}{Strategy: Cascade Inference Pipeline}
+    \vspace{-0.2cm}
+    Per mitigare i falsi positivi sulla classe maggioritaria (Human), abbiamo diviso il problema in due stadi logici sequenziali.
+    \vspace{0.2cm}
+
+    \begin{center}
+    \begin{tikzpicture}[node distance=1.2cm, auto, thick, scale=0.85, transform shape]
+        \tikzstyle{decision} = [diamond, draw, fill=CyanGlow!10, text width=1.5cm, align=center, inner sep=0pt, font=\sffamily\scriptsize\bfseries]
+        \tikzstyle{block} = [rectangle, draw=none, fill=white, drop shadow, 
+                             text width=2.2cm, text centered, rounded corners, minimum height=1.2cm, font=\sffamily\scriptsize\bfseries]
+        \tikzstyle{label} = [rectangle, fill=Obsidian, text=white, rounded corners, font=\sffamily\tiny\bfseries]
+        \tikzstyle{line} = [draw, -latex, very thick, color=gray!40]
+
+        % Nodi
+        \node [block, fill=Obsidian, text=white] (input) {\faCode\\ Input Code};
+        
+        % Stage 1
+        \node [decision, right=0.8cm of input] (binary) {Stage 1\\ Binary?};
+        
+        \node [block, fill=gray!20, text=gray!60, below=1cm of binary] (human) {\faUser\\ Label:\\ HUMAN};
+        
+        % Stage 2
+        \node [block, fill=VividViolet, text=white, right=1.5cm of binary] (family) {\faSitemap\\ Stage 2\\ Families};
+        
+        % Uscita AI
+        \node [block, fill=CyanGlow!20, text=Obsidian, right=1cm of family] (ai_out) {\faTag\\ Label:\\ GPT / Llama};
+
+        % Connessioni
+        \draw [line] (input) -- (binary);
+        
+        \draw [line] (binary) -- node[midway, fill=white, font=\sffamily\tiny] {HUMAN} (human);
+        \draw [line] (binary) -- node[midway, above, font=\sffamily\tiny] {AI DETECTED} (family);
+        
+        \draw [line] (family) -- (ai_out);
+        
+    \end{tikzpicture}
+    \end{center}
+
+    \vspace{0.1cm}
+    \begin{tcolorbox}[colback=white, colframe=VividViolet, boxrule=0.5pt, sharp corners, left=2pt, right=2pt, top=2pt, bottom=2pt]
+        \begin{columns}
+            \column{0.5\textwidth}
+            \centering \scriptsize \textbf{\faLock\ Stage 1 (Binary Filter)} \\ Protegge dai falsi positivi umani.
+            \column{0.5\textwidth}
+            \centering \scriptsize \textbf{\faSearch\ Stage 2 (Fine-Grained)} \\ Specializzato solo sulle differenze tra LLM.
+        \end{columns}
+    \end{tcolorbox}
+\end{frame}
+
+% ---------------------------------------------------
+% SLIDE 3: CUSTOM MODEL & LOSS
+% ---------------------------------------------------
+\begin{frame}{Architecture: Style-Injected Neural Network}
+    \vspace{-0.3cm}
+    
+    % BLOCCO ARCHITETTURA
+    \begin{tcolorbox}[
+        enhanced, title=\textbf{\faCogs \ \ Custom Model Architecture},
+        colframe=Obsidian, colback=white, coltitle=white,
+        boxed title style={colback=VividViolet},
+        boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+        top=3pt, bottom=3pt
+    ]
+        \footnotesize
+        Estensione di \textbf{UniXcoder-base} con iniezione di feature stilistiche nello spazio latente.
+        
+        \vspace{0.1cm}
+        \begin{columns}
+            \column{0.65\textwidth}
+            \begin{itemize} \setlength\itemsep{0pt}
+                \item \textbf{Attention Pooling:} Somma pesata dei token (meglio del [CLS] standard).
+                \item \textbf{Style Projector:} 8 feature manuali (es. density, snake\_case) proiettate in uno spazio denso.
+                \item \textbf{Feature Fusion:} Concatenazione (Semantic + Projected Style) pre-classifica.
+            \end{itemize}
+            
+            \column{0.35\textwidth}
+            \centering
+            \begin{tikzpicture}[scale=0.6, transform shape, font=\sffamily]
+                \node[draw, fill=gray!10, rounded corners] (enc) {UniXcoder};
+                \node[draw, fill=CyanGlow!20, right=0.5cm of enc] (style) {Style Proj.};
+                \node[draw, fill=VividViolet, text=white, below=0.5cm of enc, xshift=1cm] (concat) {Concat \& Head};
+                \draw[->] (enc) -- (concat);
+                \draw[->] (style) -- (concat);
+            \end{tikzpicture}
+        \end{columns}
+    \end{tcolorbox}
+
+    \vspace{0.1cm}
+
+    % BLOCCO TRAINING
+    \begin{tcolorbox}[
+        enhanced, title=\textbf{\faDna \ \ Advanced Training Strategy},
+        colframe=Obsidian, colback=white, coltitle=white,
+        boxed title style={colback=CyanGlow!80!blue},
+        boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+        top=3pt, bottom=3pt
+    ]
+        \begin{itemize} \setlength\itemsep{2pt} \footnotesize
+            \item \textbf{\faMagnet\ Supervised Contrastive Loss (SupCon):} Avvicina nello spazio vettoriale gli snippet della stessa famiglia (es. Llama-2 e Llama-3) e allontana famiglie diverse.
+            \item \textbf{\faCrosshairs\ Focal Loss:} Penalizza gli errori sulle classi difficili/rare, mitigando l'impatto dello sbilanciamento delle classi.
+        \end{itemize}
+    \end{tcolorbox}
+
+\end{frame}
+
+% ---------------------------------------------------
+% SUBTASK C
+% ---------------------------------------------------
+
+% ---------------------------------------------------
+% SLIDE 1: THE HYBRID CHALLENGE
+% ---------------------------------------------------
+\begin{frame}{Subtask C: Hybrid \& Adversarial Code}
+    \vspace{-0.3cm}
+    Il livello più avanzato della competizione: rilevare non solo chi ha scritto il codice, ma \textbf{come} è stato modificato o offuscato.
+    \vspace{0.1cm}
+
+    \begin{columns}[t, onlytextwidth]
+        % COLONNA SX: 4 CLASSI
+        \column{0.48\textwidth}
+        \begin{tcolorbox}[
+            enhanced, title=\textbf{\faRandom \ \ 4 Target Classes},
+            colframe=Obsidian, colback=white, coltitle=white,
+            boxed title style={colback=CyanGlow!80!blue},
+            boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+            top=3pt, bottom=3pt
+        ]
+            \footnotesize
+            Il modello deve classificare lo snippet in:
+            \begin{itemize} \setlength\itemsep{0pt}
+                \item \textbf{0: Human-Written}
+                \item \textbf{1: Machine-Generated}
+                \item \textbf{2: Hybrid (Mixed):} Codice umano completato o refactorizzato da AI.
+                \item \textbf{3: Adversarial:} Codice AI generato con prompt avversari per evadere la detection.
+            \end{itemize}
+        \end{tcolorbox}
+
+        % COLONNA DX: OBIETTIVO ROBUSTEZZA
+        \column{0.48\textwidth}
+        \begin{tcolorbox}[
+            enhanced, title=\textbf{\faLock \ \ Robustness Goal},
+            colframe=Obsidian, colback=gray!5, coltitle=white,
+            boxed title style={colback=Charcoal},
+            boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+            top=3pt, bottom=3pt
+        ]
+            \centering
+            \textbf{Problem:} I modelli standard imparano correlazioni spurie (es. "C++ è sempre umano").
+            
+            \vspace{0.2cm}
+            \textbf{Solution:} Dobbiamo costringere il modello a ignorare il linguaggio e guardare la \textit{struttura}.
+            
+            \vspace{0.1cm}
+            \scriptsize \textit{Key Tech: \textbf{Domain Adversarial Training (DANN)}}
+        \end{tcolorbox}
+    \end{columns}
+\end{frame}
+
+% ---------------------------------------------------
+% SLIDE 2: ARCHITETTURA DANN
+% ---------------------------------------------------
+\begin{frame}{Architecture: Language-Invariant Learning}
+    \vspace{-0.2cm}
+    Per generalizzare su linguaggi non visti (es. Go, PHP), utilizziamo un \textbf{Gradient Reversal Layer (GRL)}.
+    \vspace{0.1cm}
+
+    \begin{center}
+    \begin{tikzpicture}[node distance=1.2cm, auto, thick, scale=0.8, transform shape, font=\sffamily]
+        % Nodi
+        \node[draw, fill=gray!10, rounded corners, minimum width=2cm] (enc) {\textbf{GraphCodeBERT}};
+        
+        % Ramo Task
+        \node[draw, fill=CyanGlow!20, above right=0.8cm and 1cm of enc] (class) {\textbf{Task Classifier}};
+        \node[right=0.5cm of class] (out_task) {Label (0-3)};
+        
+        % Ramo Avversario
+        \node[draw, diamond, fill=VividViolet, text=white, below right=0.8cm and 1cm of enc] (grl) {\textbf{GRL}};
+        \node[draw, fill=red!10, right=0.8cm of grl] (domain) {\textbf{Lang Classifier}};
+        \node[right=0.5cm of domain] (out_lang) {Language ID};
+
+        % Connessioni
+        \draw[->, very thick] (enc) -- (class);
+        \draw[->, very thick] (class) -- (out_task);
+        
+        \draw[->, very thick] (enc) -- (grl);
+        \draw[->, very thick] (grl) -- (domain);
+        \draw[->, very thick] (domain) -- (out_lang);
+        
+        % Annotazioni
+        \node[align=center, font=\tiny, above=0.1cm of class] {Minimise Task Loss};
+        \node[align=center, font=\tiny, below=0.1cm of domain] {Maximise Lang Loss};
+    \end{tikzpicture}
+    \end{center}
+
+    \vspace{0.1cm}
+    \begin{tcolorbox}[colback=white, colframe=VividViolet, boxrule=0.5pt, sharp corners, left=2pt, right=2pt, top=2pt, bottom=2pt]
+        \centering \scriptsize
+        \textbf{Logic:} Il GRL inverte il gradiente durante la backpropagation. Il modello impara feature che sono \textit{utili per la classificazione} ma \textit{inutili per indovinare il linguaggio}, diventando così "Language Agnostic".
+    \end{tcolorbox}
+\end{frame}
+
+% ---------------------------------------------------
+% SLIDE 3: TRAINING & ENSEMBLE
+% ---------------------------------------------------
+\begin{frame}{Training Strategy \& Ensemble Submission}
+    \vspace{-0.3cm}
+    
+    % BLOCCO COMPOSITE LOSS
+    \begin{tcolorbox}[
+        enhanced, title=\textbf{\faBalanceScale \ \ Multi-Objective Loss Function},
+        colframe=Obsidian, colback=white, coltitle=white,
+        boxed title style={colback=CyanGlow!80!blue},
+        boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+        top=3pt, bottom=3pt
+    ]
+        \footnotesize
+        \[ \mathcal{L}_{total} = \mathcal{L}_{Task} + \lambda_1 \mathcal{L}_{SupCon} + \lambda_2 \mathcal{L}_{DANN} \]
+        \begin{itemize} \setlength\itemsep{0pt}
+            \item \textbf{Focal Loss ($\mathcal{L}_{Task}$):} Gestisce lo sbilanciamento delle 4 classi.
+            \item \textbf{SupCon ($\mathcal{L}_{SupCon}$):} Clusterizza feature simili (es. Hybrid con Hybrid).
+            \item \textbf{Adversarial ($\mathcal{L}_{DANN}$):} Rimuove il bias del linguaggio.
+        \end{itemize}
+    \end{tcolorbox}
+
+    \vspace{0.1cm}
+
+    % BLOCCO ENSEMBLE
+    \begin{tcolorbox}[
+        enhanced, title=\textbf{\faLayerGroup \ \ 5-Fold Ensemble Inference},
+        colframe=Obsidian, colback=white, coltitle=white,
+        boxed title style={colback=VividViolet},
+        boxrule=0.5pt, drop fuzzy shadow, fonttitle=\bfseries\small,
+        top=3pt, bottom=3pt
+    ]
+        \begin{columns}
+            \column{0.15\textwidth} \centering \Huge \faServer
+            \column{0.85\textwidth}
+            \footnotesize
+            Per la sottomissione finale, non usiamo un singolo modello ma un \textbf{Ensemble di 5 modelli} addestrati su fold diversi (Cross-Validation).
+            \begin{itemize} \setlength\itemsep{0pt} \scriptsize
+                \item \textbf{Aggregazione:} Soft Voting (Media delle probabilità).
+                \item \textbf{Beneficio:} Riduce la varianza e aumenta la robustezza su dati OOD.
+            \end{itemize}
+        \end{columns}
+    \end{tcolorbox}
+
+\end{frame}
