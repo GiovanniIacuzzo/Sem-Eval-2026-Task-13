@@ -1,212 +1,264 @@
 import os
 import sys
-import logging
 import yaml
 import torch
+import argparse
+import logging
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
+import re
 from tqdm import tqdm
-from dotenv import load_dotenv
-from typing import List
-from copy import deepcopy
-from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
-
-import transformers.utils.import_utils
-transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
-
-try:
-    from peft import PeftModel
-    PEFT_AVAILABLE = True
-except ImportError:
-    PEFT_AVAILABLE = False
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoTokenizer
+from sklearn.metrics import classification_report, confusion_matrix
 
 from src.src_TaskC.models.model import CodeClassifier
-from src.src_TaskC.dataset.Inference_dataset import SlidingWindowDataset
+from src.src_TaskC.utils.utils import set_seed
 
+# -----------------------------------------------------------------------------
+# 1. SETUP & LOGGING
+# -----------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO, 
-    format="%(asctime)s | %(levelname)s | %(message)s", 
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------------------------------------
-# Model Loader
-# -----------------------------------------------------------------------------
-def load_ensemble_models(config, checkpoint_dir, device, k_folds=5) -> List[CodeClassifier]:
-    models = []
-    logger.info(f"Loading {k_folds} folds from {checkpoint_dir}...")
-    config_clean = deepcopy(config)
-    config_clean["model"]["use_lora"] = False 
-    
-    for fold in range(k_folds):
-        fold_dir = os.path.join(checkpoint_dir, f"fold_{fold}")
-        if not os.path.exists(fold_dir): 
-            logger.warning(f"Fold {fold} missing, skipping.")
-            continue
-        
-        model = CodeClassifier(config_clean)
-        if config["model"].get("use_lora", False) and PEFT_AVAILABLE:
-            try:
-                model.base_model = PeftModel.from_pretrained(model.base_model, fold_dir)
-                head_path = os.path.join(fold_dir, "head.pt")
-                if os.path.exists(head_path):
-                    model.classifier.load_state_dict(torch.load(head_path, map_location=device))
-            except Exception as e:
-                logger.error(f"Error loading LoRA fold {fold}: {e}")
-                continue
-        else:
-            model_path = os.path.join(fold_dir, "model.pt")
-            if os.path.exists(model_path):
-                model.load_state_dict(torch.load(model_path, map_location=device))
-            
-        model.to(device)
-        model.eval()
-        models.append(model)
-    
-    logger.info(f"Loaded {len(models)} models.")
-    return models
+LABEL_MAPPING = {
+    0: "Human",
+    1: "AI-Generated",
+    2: "Hybrid",
+    3: "Adversarial"
+}
 
 # -----------------------------------------------------------------------------
-# Evaluation Logic
+# 2. INFERENCE DATASET
 # -----------------------------------------------------------------------------
-def run_diagnostic_inference(models, test_df, id_col, label_col, output_dir, device, max_length):
-    tokenizer = models[0].tokenizer
+class InferenceDataset(Dataset):
+    def __init__(self, dataframe, tokenizer, max_length=512):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        
+        self.codes = dataframe['code'].astype(str).tolist()
+        
+        if 'label' in dataframe.columns:
+            self.labels = dataframe['label'].astype(int).tolist()
+        else:
+            self.labels = [-1] * len(self.codes)
+
+    def _extract_stylistic_features(self, code):
+        """
+        Deve essere ESATTAMENTE la stessa logica usata in training.
+        """
+        features = []
+        lines = code.split('\n')
+        non_empty_lines = [l for l in lines if l.strip()]
+        code_len = len(code) + 1
+        
+        features.append(code.count(' ') / code_len)
+        features.append((code.count('#') + code.count('//')) / code_len)
+        features.append(len(re.findall(r'[{}()\[\];.,]', code)) / code_len)
+        avg_line_len = np.mean([len(l) for l in non_empty_lines]) if non_empty_lines else 0
+        features.append(min(avg_line_len / 100.0, 1.0))
+        features.append((len(lines) - len(non_empty_lines)) / (len(lines) + 1))
+        snake_count = code.count('_')
+        camel_count = len(re.findall(r'[a-z][A-Z]', code))
+        features.append(snake_count / (snake_count + camel_count + 1))
+        logic_tokens = len(re.findall(r'\b(if|for|while|return|switch|case|break)\b', code))
+        features.append(logic_tokens / (len(code.split()) + 1))
+        max_indent = 0
+        if non_empty_lines:
+            max_indent = max([len(l) - len(l.lstrip()) for l in non_empty_lines])
+        features.append(min(max_indent / 20.0, 1.0))
+        
+        return torch.tensor(features, dtype=torch.float)
+
+    def __len__(self):
+        return len(self.codes)
+
+    def __getitem__(self, idx):
+        code = self.codes[idx]
+        
+        style_feats = self._extract_stylistic_features(code)
+        
+        tokens = self.tokenizer.tokenize(code)
+        capacity = self.max_length - 2 
+        
+        if len(tokens) <= capacity:
+            chunk_str = code
+        else:
+            half = capacity // 2
+            kept_tokens = tokens[:half] + tokens[-half:]
+            chunk_str = self.tokenizer.convert_tokens_to_string(kept_tokens)
+
+        encoding = self.tokenizer(
+            chunk_str,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+        
+        return {
+            "input_ids": encoding["input_ids"].squeeze(0),
+            "attention_mask": encoding["attention_mask"].squeeze(0),
+            "extra_features": style_feats,
+            "original_label": self.labels[idx],
+            "text_snippet": code[:50]
+        }
+
+def inference_collate(batch):
+    input_ids = torch.stack([item['input_ids'] for item in batch])
+    attention_mask = torch.stack([item['attention_mask'] for item in batch])
+    extra_features = torch.stack([item['extra_features'] for item in batch])
+    original_labels = [item['original_label'] for item in batch]
+    snippets = [item['text_snippet'] for item in batch]
     
-    dataset = SlidingWindowDataset(
-        test_df, tokenizer, max_length, id_col, label_col, stride=384
-    )
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "extra_features": extra_features,
+        "original_labels": original_labels,
+        "snippets": snippets
+    }
+
+# -----------------------------------------------------------------------------
+# 3. MODEL LOADING
+# -----------------------------------------------------------------------------
+def load_model(checkpoint_path, config, device):
+    model_config = {
+        "model": {
+            "model_name": config["model"]["model_name"],
+            "num_labels": 4,
+            "num_extra_features": 8,
+        },
+        "training": config.get("training", {}),
+    }
     
-    ids = []
-    preds = []
-    trues = []
-    confs = []
-    n_chunks_list = []
+    model = CodeClassifier(model_config)
     
-    logger.info(f"Evaluating {len(dataset)} samples with Sliding Window...")
+    logger.info(f"Loading weights from: {checkpoint_path}")
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    if os.path.isdir(checkpoint_path):
+        weights_path = os.path.join(checkpoint_path, "best_model.bin")
+        if not os.path.exists(weights_path):
+            weights_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+    else:
+        weights_path = checkpoint_path
+        
+    state_dict = torch.load(weights_path, map_location=device)
+    
+    new_state_dict = {k.replace("module.", "").replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(new_state_dict, strict=False)
+    model.to(device)
+    model.eval()
+    
+    return model
+
+# -----------------------------------------------------------------------------
+# 4. INFERENCE LOOP
+# -----------------------------------------------------------------------------
+def run_inference(model, dataloader, device):
+    predictions = []
+    probabilities = []
+    ground_truth = []
+    snippets = []
+    
+    logger.info("Running Inference...")
+    pbar = tqdm(dataloader, desc="Predicting", unit="batch")
     
     with torch.no_grad():
-        for i in tqdm(range(len(dataset)), desc="Eval"):
-            sample = dataset[i]
-            chunks = sample["chunks"]
-            label_true = sample["label"]
+        for batch in pbar:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            extra_features = batch["extra_features"].to(device)
             
-            encodings = tokenizer(
-                chunks, 
-                truncation=True, padding="max_length", max_length=max_length, return_tensors="pt"
+            logits, _, _ = model(
+                input_ids, 
+                attention_mask, 
+                extra_features=extra_features
             )
-            input_ids = encodings["input_ids"].to(device)
-            attention_mask = encodings["attention_mask"].to(device)
             
-            # --- ENSEMBLE VOTING ---
-            file_probs_sum = None
+            probs = torch.softmax(logits, dim=1)
+            preds = torch.argmax(probs, dim=1)
             
-            for model in models:
-                logits, _ = model(input_ids, attention_mask, alpha=0.0)
-                chunk_probs = torch.softmax(logits, dim=1) 
-                
-                # Media sui chunk per questo modello
-                model_file_prob = torch.mean(chunk_probs, dim=0)
-                
-                if file_probs_sum is None:
-                    file_probs_sum = model_file_prob
-                else:
-                    file_probs_sum += model_file_prob
-            
-            # Media finale su ensemble
-            final_probs = file_probs_sum / len(models)
-            best_class = torch.argmax(final_probs).item()
-            confidence = final_probs[best_class].item()
-            
-            ids.append(sample["id"])
-            preds.append(best_class)
-            trues.append(label_true)
-            confs.append(confidence)
-            n_chunks_list.append(sample["num_chunks"])
+            predictions.extend(preds.cpu().tolist())
+            probabilities.extend(probs.cpu().tolist())
+            ground_truth.extend(batch["original_labels"])
+            snippets.extend(batch["snippets"])
 
-    # --- METRICS & REPORTING ---
-    os.makedirs(output_dir, exist_ok=True)
-    
-    report = classification_report(trues, preds, digits=4)
-    logger.info(f"\nClassification Report:\n{report}")
-    
-    acc = accuracy_score(trues, preds)
-    f1 = f1_score(trues, preds, average="macro")
-    logger.info(f"Global Accuracy: {acc:.4f} | Macro F1: {f1:.4f}")
-    
-    with open(os.path.join(output_dir, "report.txt"), "w") as f:
-        f.write(report)
-        f.write(f"\nAccuracy: {acc:.4f}\nMacro F1: {f1:.4f}")
-
-    cm = confusion_matrix(trues, preds)
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.title(f'Confusion Matrix (Sliding Window) - F1: {f1:.3f}')
-    plt.savefig(os.path.join(output_dir, "confusion_matrix.png"))
-    plt.close()
-    
-    results_df = pd.DataFrame({
-        "id": ids,
-        "true_label": trues,
-        "pred_label": preds,
-        "confidence": confs,
-        "num_chunks": n_chunks_list,
-        "is_correct": [t == p for t, p in zip(trues, preds)]
-    })
-    
-    results_df.to_csv(os.path.join(output_dir, "all_predictions.csv"), index=False)
-    
-    errors_df = results_df[results_df["is_correct"] == False]
-    errors_df.to_csv(os.path.join(output_dir, "errors_only.csv"), index=False)
-    
-    logger.info(f"Saved diagnostics to {output_dir}")
-    logger.info(f"Total Errors: {len(errors_df)}/{len(dataset)}")
-    
-    long_files = results_df[results_df["num_chunks"] > 2]
-    if not long_files.empty:
-        acc_long = long_files["is_correct"].mean()
-        logger.info(f"Accuracy on LONG files (>2 chunks): {acc_long:.4f} (Count: {len(long_files)})")
-    
-    short_files = results_df[results_df["num_chunks"] <= 2]
-    if not short_files.empty:
-        acc_short = short_files["is_correct"].mean()
-        logger.info(f"Accuracy on SHORT files (<=2 chunks): {acc_short:.4f}")
+    return predictions, probabilities, ground_truth, snippets
 
 # -----------------------------------------------------------------------------
-# Main
+# 5. MAIN
 # -----------------------------------------------------------------------------
-if __name__ == "__main__":
-    load_dotenv()
-    
-    config_path = "src/src_TaskC/config/config.yaml"
-    checkpoint_dir = "results/results_TaskC/checkpoints"
-    output_dir = "results/results_TaskC/inference_output"
-    
-    with open(config_path, "r") as f: config = yaml.safe_load(f)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test_file", type=str, required=True, help="Path to parquet file")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint (.bin or dir)")
+    parser.add_argument("--config", type=str, default="src/src_TaskC/config/config.yaml")
+    parser.add_argument("--output_dir", type=str, default="results/TaskC_Inference")
+    args = parser.parse_args()
+
+    set_seed(42)
+    os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    models = load_ensemble_models(config, checkpoint_dir, device)
-    
-    test_path = "data/Task_C/test_sample.parquet"
-    if not os.path.exists(test_path):
-        logger.error(f"Test sample not found at {test_path}")
-        sys.exit(1)
-        
-    df = pd.read_parquet(test_path)
-    logger.info(f"Loaded {len(df)} samples from {test_path}")
-    
-    id_col = next((c for c in ["id", "ID", "sample_id"] if c in df.columns), "id")
-    label_col = next((c for c in ["label", "true_label"] if c in df.columns), "label")
-    
-    if label_col not in df.columns:
-        logger.error("ERRORE: Non trovo la colonna delle label nel test_sample!")
-        sys.exit(1)
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
 
-    run_diagnostic_inference(
-        models, df, id_col, label_col,
-        output_dir, device, 
-        config["data"]["max_length"]
+    model_name = config["model"]["model_name"]
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    model = load_model(args.checkpoint, config, device)
+    
+    logger.info(f"Reading Test Data: {args.test_file}")
+    df_test = pd.read_parquet(args.test_file)
+    
+    dataset = InferenceDataset(df_test, tokenizer, max_length=config["data"]["max_length"])
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=config["training"]["batch_size"], 
+        shuffle=False, 
+        num_workers=4, 
+        collate_fn=inference_collate
     )
+    
+    preds, probs, truths, snippets = run_inference(model, dataloader, device)
+    
+    pred_labels = [LABEL_MAPPING[p] for p in preds]
+    
+    results_df = pd.DataFrame({
+        "snippet": snippets,
+        "true_label_id": truths,
+        "pred_label_id": preds,
+        "pred_label": pred_labels,
+        "confidence": [max(p) for p in probs]
+    })
+    
+    if all(t != -1 for t in truths):
+        true_labels_str = [LABEL_MAPPING.get(t, "Unknown") for t in truths]
+        
+        logger.info("-" * 50)
+        logger.info("CLASSIFICATION REPORT")
+        logger.info("-" * 50)
+        
+        print(classification_report(true_labels_str, pred_labels, digits=4, zero_division=0))
+        
+        labels_list = ["Human", "AI-Generated", "Hybrid", "Adversarial"]
+        cm = confusion_matrix(true_labels_str, pred_labels, labels=labels_list)
+        cm_df = pd.DataFrame(cm, index=labels_list, columns=labels_list)
+        cm_df.to_csv(os.path.join(args.output_dir, "confusion_matrix.csv"))
+        logger.info(f"Confusion Matrix saved to {args.output_dir}")
+
+    output_path = os.path.join(args.output_dir, "predictions.csv")
+    results_df.to_csv(output_path, index=False)
+    logger.info(f"Predictions saved to {output_path}")
+
+if __name__ == "__main__":
+    main()

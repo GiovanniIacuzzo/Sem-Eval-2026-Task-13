@@ -2,34 +2,52 @@ import torch
 import numpy as np
 import gc
 import logging
+import random
 from typing import Dict, List, Tuple
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report, confusion_matrix
 from torch.amp import autocast
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# Metric Computation
+# 0. General Utils
+# -----------------------------------------------------------------------------
+def set_seed(seed: int = 42):
+    """Fissa il seed per la riproducibilità."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = True
+
+# -----------------------------------------------------------------------------
+# 1. Metric Computation
 # -----------------------------------------------------------------------------
 def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
     """
-    Calcola metriche dettagliate. Fondamentale per vedere se il modello
-    sta imparando le classi rare (Hybrid/Adversarial).
+    Calcola metriche dettagliate. 
+    Macro F1 è la metrica ufficiale per classi sbilanciate.
     """
     preds = np.array(preds)
     labels = np.array(labels)
 
     accuracy = accuracy_score(labels, preds)
-    precision, recall, f1, _ = precision_recall_fscore_support(
+    
+    precision_mac, recall_mac, f1_macro, _ = precision_recall_fscore_support(
         labels, preds, average='macro', zero_division=0
+    )
+    
+    _, _, f1_weighted, _ = precision_recall_fscore_support(
+        labels, preds, average='weighted', zero_division=0
     )
 
     metrics = {
         "accuracy": float(accuracy),
-        "f1": float(f1),         
-        "precision": float(precision),
-        "recall": float(recall)
+        "f1_macro": float(f1_macro),         
+        "f1_weighted": float(f1_weighted),
+        "precision_macro": float(precision_mac),
+        "recall_macro": float(recall_mac)
     }
 
     _, _, f1_per_class, _ = precision_recall_fscore_support(
@@ -42,13 +60,14 @@ def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
     return metrics
 
 # -----------------------------------------------------------------------------
-# Evaluation Loop
+# 2. Evaluation Loop
 # -----------------------------------------------------------------------------
 def evaluate(
     model: torch.nn.Module, 
     dataloader: torch.utils.data.DataLoader, 
     device: torch.device,
-    verbose: bool = False
+    verbose: bool = False,
+    label_names: List[str] = ["Human", "AI", "Hybrid", "Adv"]
 ) -> Tuple[Dict[str, float], List[int], List[int]]:
     
     model.eval()
@@ -72,18 +91,16 @@ def evaluate(
         for batch in progress_bar:
             input_ids      = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            style_feats    = batch["style_feats"].to(device, non_blocking=True)
             labels         = batch["labels"].to(device, non_blocking=True)
-            lang_ids       = batch["lang_ids"].to(device, non_blocking=True)
+            
+            extra_features = batch["extra_features"].to(device, non_blocking=True)
             
             with autocast(device_type=device_type, dtype=dtype):
-                logits, loss = model(
+                logits, loss, _ = model(
                     input_ids, 
                     attention_mask, 
-                    style_feats=style_feats,
-                    lang_ids=lang_ids,
                     labels=labels, 
-                    alpha=0.0 
+                    extra_features=extra_features
                 )
             
             if loss is not None:
@@ -94,24 +111,20 @@ def evaluate(
             predictions.extend(preds.detach().cpu().numpy())
             references.extend(labels.detach().cpu().numpy())
             
-            del input_ids, attention_mask, style_feats, labels, lang_ids, logits, loss
+            del input_ids, attention_mask, extra_features, labels, logits, loss
 
-    if hasattr(model, 'compute_metrics'):
-        eval_metrics = model.compute_metrics(predictions, references)
-    else:
-        from src.src_TaskC.models.model import compute_metrics
-        eval_metrics = compute_metrics(predictions, references)
-        
+    eval_metrics = compute_metrics(predictions, references)
     eval_metrics["loss"] = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
     
     if verbose:
-        from sklearn.metrics import classification_report
-        report = classification_report(
+        logger.info("\n" + classification_report(
             references, predictions, 
+            target_names=label_names[:len(set(references) | set(predictions))],
             zero_division=0,
             digits=4
-        )
-        logger.info(f"\nClassification Report:\n{report}")
+        ))
+        cm = confusion_matrix(references, predictions)
+        logger.info(f"Confusion Matrix:\n{cm}")
 
     if device.type == 'cuda':
         torch.cuda.empty_cache()

@@ -1,217 +1,169 @@
 import os
-import random
-import logging
-import pandas as pd
 import torch
+import pandas as pd
 import numpy as np
 import re
-from typing import Dict, Tuple
+import logging
 from torch.utils.data import Dataset
 from sklearn.utils.class_weight import compute_class_weight
+from tqdm import tqdm
 
-# -----------------------------------------------------------------------------
-# Logger Setup
-# -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------------------------------------
-# Pre-computation Utilities
-# -----------------------------------------------------------------------------
-def precompute_style_features(df: pd.DataFrame) -> pd.DataFrame:
-    logger.info("Pre-computing stylistic features...")
+# =============================================================================
+# 1. UTILS DI CARICAMENTO & BILANCIAMENTO
+# =============================================================================
 
-    def _extract_single(code):
-        if not isinstance(code, str): code = str(code)
+def get_class_weights(df, device):
+    """
+    Calcola i pesi delle classi inversamente proporzionali alla loro frequenza.
+    Fondamentale per la Focal Loss nel Task C dove le classi 2 e 3 sono rare.
+    """
+    if 'label' not in df.columns:
+        raise ValueError("Il dataframe deve contenere la colonna 'label'")
         
-        lines = code.split('\n')
-        num_lines = len(lines) if len(lines) > 0 else 1
-        code_len = len(code) + 1
-        words = len(code.split()) + 1
-        
-        comments = len(re.findall(r'(//|#|/\*|--)', code))
-        comment_density = comments / words
-        
-        space_ratio = code.count(' ') / code_len
-        
-        avg_line_len = (code_len / num_lines) / 100.0
-        
-        special_chars_count = len(re.findall(r'[!@#$%^&*()\-+={}\[\]|\\:;"\'<>,.?/]', code))
-        special_chars = special_chars_count / code_len
-
-        return [comment_density, space_ratio, avg_line_len, special_chars]
-
-    df['style_feats_vec'] = df['code'].apply(_extract_single)
+    y = df['label'].values
+    classes = np.unique(y)
     
-    logger.info("Stylistic features computed.")
-    return df
+    if len(classes) < 4:
+        logger.warning(f"Attenzione: Trovate solo {len(classes)} classi nel training set: {classes}")
+    
+    weights = compute_class_weight(class_weight='balanced', classes=classes, y=y)
+    
+    weights_tensor = torch.ones(4, dtype=torch.float32)
+    for cls, w in zip(classes, weights):
+        if cls < 4:
+            weights_tensor[int(cls)] = float(w)
+            
+    logger.info(f"Class Weights Computed: {weights_tensor.numpy()}")
+    return weights_tensor.to(device)
 
-# -----------------------------------------------------------------------------
-# Dataset Class
-# -----------------------------------------------------------------------------
+
+def load_data_for_training(config):
+    """
+    Carica i dati di training e validation.
+    Applica opzionalmente strategie di downsampling per le classi maggioritarie.
+    """
+    data_dir = config["data"].get("data_dir", "data/Task_C_Processed")
+    train_path = os.path.join(data_dir, "train_processed.parquet")
+    val_path = os.path.join(data_dir, "val_processed.parquet")
+    
+    if not os.path.exists(train_path) or not os.path.exists(val_path):
+        raise FileNotFoundError(f"Non trovo i file parquet in {data_dir}. Hai eseguito prepare_data.py?")
+
+    logger.info(f"Loading Training Data from {train_path}...")
+    train_df = pd.read_parquet(train_path)
+    val_df = pd.read_parquet(val_path)
+    
+    max_samples = config["data"].get("max_samples_per_class", None) 
+    
+    if max_samples:
+        logger.info(f"Applying Class Balancing (Max samples per class: {max_samples})...")
+        balanced_dfs = []
+        for label in sorted(train_df['label'].unique()):
+            df_subset = train_df[train_df['label'] == label]
+            if len(df_subset) > max_samples:
+                df_subset = df_subset.sample(n=max_samples, random_state=42)
+            balanced_dfs.append(df_subset)
+        
+        train_df = pd.concat(balanced_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
+        logger.info(f"New Training Size: {len(train_df)}")
+        logger.info(f"New Distribution:\n{train_df['label'].value_counts()}")
+
+    return train_df, val_df
+
+# =============================================================================
+# 2. DATASET CLASS
+# =============================================================================
+
 class CodeDataset(Dataset):
-    def __init__(self, 
-                 dataframe: pd.DataFrame, 
-                 tokenizer, 
-                 language_map: Dict[str, int],
-                 max_length: int = 512, 
-                 augment: bool = False):
-        
-        self.data = dataframe.reset_index(drop=True)
+    def __init__(self, dataframe, tokenizer, max_length=512, is_train=False):
         self.tokenizer = tokenizer
-        self.language_map = language_map
         self.max_length = max_length
-        self.augment = augment
+        
+        self.input_ids = []
+        self.attention_masks = []
+        self.labels = []
+        self.extra_features = []
+        
+        dataframe = dataframe.dropna(subset=['code', 'label']).copy()
+        
+        codes = dataframe['code'].astype(str).tolist()
+        raw_labels = dataframe['label'].astype(int).tolist()
+        
+        desc = f"[{'Train' if is_train else 'Val'}] Processing"
+        
+        # Loop principale
+        for i, code in enumerate(tqdm(codes, desc=desc, dynamic_ncols=True)):
+            label = raw_labels[i]
+            
+            stylistic_feats = self._extract_stylistic_features(code)
+            
+            tokens = tokenizer.tokenize(code)
+            capacity = max_length - 2
+            
+            if len(tokens) <= capacity:
+                chunk_str = code
+            else:
+                half = capacity // 2
+                kept_tokens = tokens[:half] + tokens[-half:]
+                chunk_str = tokenizer.convert_tokens_to_string(kept_tokens)
 
-    def _structural_noise(self, code: str) -> str:
-        """Applies random structural noise for data augmentation."""
+            encoding = self.tokenizer(
+                chunk_str,
+                truncation=True,
+                padding="max_length",
+                max_length=self.max_length,
+                return_tensors="pt"
+            )
+            
+            self.input_ids.append(encoding["input_ids"].squeeze(0))
+            self.attention_masks.append(encoding["attention_mask"].squeeze(0))
+            self.labels.append(torch.tensor(label, dtype=torch.long))
+            self.extra_features.append(stylistic_feats)
+
+    def _extract_stylistic_features(self, code):
+        """
+        L'estrattore del Task B che ha funzionato bene.
+        Include metriche vitali per rilevare Adversarial Code.
+        """
+        features = []
         lines = code.split('\n')
-        new_lines = []
-        for line in lines:
-            if random.random() < 0.05: new_lines.append("")
-            if random.random() < 0.05: line = line + " " * random.randint(1, 3)
-            new_lines.append(line)
-        return "\n".join(new_lines)
+        non_empty_lines = [l for l in lines if l.strip()]
+        code_len = len(code) + 1
+        
+        features.append(code.count(' ') / code_len)
+        
+        features.append((code.count('#') + code.count('//')) / code_len)
+        
+        features.append(len(re.findall(r'[{}()\[\];.,]', code)) / code_len)
+        
+        avg_line_len = np.mean([len(l) for l in non_empty_lines]) if non_empty_lines else 0
+        features.append(min(avg_line_len / 100.0, 1.0))
+        
+        features.append((len(lines) - len(non_empty_lines)) / (len(lines) + 1))
+        
+        snake_count = code.count('_')
+        camel_count = len(re.findall(r'[a-z][A-Z]', code))
+        features.append(snake_count / (snake_count + camel_count + 1))
+        
+        logic_tokens = len(re.findall(r'\b(if|for|while|return|switch|case|break)\b', code))
+        features.append(logic_tokens / (len(code.split()) + 1))
+        
+        max_indent = 0
+        if non_empty_lines:
+            max_indent = max([len(l) - len(l.lstrip()) for l in non_empty_lines])
+        features.append(min(max_indent / 20.0, 1.0))
+        
+        return torch.tensor(features, dtype=torch.float)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        row = self.data.iloc[idx]
-        code = str(row["code"])
-        label = int(row["label"]) 
-        lang_str = str(row["language"]).lower()
-        lang_id = self.language_map.get(lang_str, -1)
-        
-        if self.augment:
-            code = self._structural_noise(code)
+    def __len__(self):
+        return len(self.labels)
 
-        full_tokens = self.tokenizer.encode(code, add_special_tokens=True) 
-        
-        if len(full_tokens) > self.max_length:
-            remaining_capacity = self.max_length - 2 
-            half = remaining_capacity // 2
-            
-            head_tokens = full_tokens[1 : 1 + half]
-            
-            tail_tokens = full_tokens[-(half + 1) : -1]
-            
-            input_ids = [self.tokenizer.cls_token_id] + head_tokens + tail_tokens + [self.tokenizer.sep_token_id]
-        else:
-            input_ids = full_tokens
-
-        input_ids = input_ids[:self.max_length]
-        
-        padding_length = self.max_length - len(input_ids)
-        if padding_length > 0:
-            input_ids = input_ids + [self.tokenizer.pad_token_id] * padding_length
-            
-        input_ids_tensor = torch.tensor(input_ids, dtype=torch.long)
-        attention_mask = (input_ids_tensor != self.tokenizer.pad_token_id).long()
-        
-        style_feats = torch.tensor(row['style_feats_vec'], dtype=torch.float32)
-        
+    def __getitem__(self, idx):
         return {
-            "input_ids": input_ids_tensor,
-            "attention_mask": attention_mask,
-            "style_feats": style_feats,
-            "labels": torch.tensor(label, dtype=torch.long),
-            "lang_ids": torch.tensor(lang_id, dtype=torch.long)
+            "input_ids": self.input_ids[idx],
+            "attention_mask": self.attention_masks[idx],
+            "labels": self.labels[idx],
+            "extra_features": self.extra_features[idx] 
         }
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-# -----------------------------------------------------------------------------
-# Data Loading & Balancing Utils
-# -----------------------------------------------------------------------------
-def load_and_preprocess(file_path: str, max_code_chars: int = 15000) -> pd.DataFrame:
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-        
-    logger.info(f"Reading parquet file: {file_path}")
-    df = pd.read_parquet(file_path, columns=['code', 'label', 'language'])
-    
-    df['language'] = df['language'].str.lower()
-    df = df.dropna(subset=['code']).reset_index(drop=True)
-    
-    df = df[df['code'].str.len() > 10].copy()
-    
-    df['code'] = df['code'].str.slice(0, max_code_chars)
-    
-    return df
-
-def get_smart_subset(df: pd.DataFrame, max_total: int = 200000) -> pd.DataFrame:
-    logger.info(f"Applying Smart Subsetting/Balancing (Target: ~{max_total})...")
-    
-    df_hybrid = df[df['label'] == 2]
-    df_adversarial = df[df['label'] == 3]
-    df_human = df[df['label'] == 0]
-    df_machine = df[df['label'] == 1]
-    
-    special_count = len(df_hybrid) + len(df_adversarial)
-    remaining_budget = max_total - special_count
-    
-    if remaining_budget <= 0:
-        logger.warning("Target size too small for rare classes. Returning rare only.")
-        return pd.concat([df_hybrid, df_adversarial]).sample(frac=1, random_state=42).reset_index(drop=True)
-    
-    target_per_class = remaining_budget // 2
-    
-    def _stratified_lang_sample(sub_df, n_target):
-        if len(sub_df) <= n_target:
-            return sub_df
-        
-        lang_counts = sub_df['language'].value_counts()
-        weights = 1.0 / lang_counts
-        
-        sample_weights = sub_df['language'].map(weights)
-        
-        return sub_df.sample(n=n_target, weights=sample_weights, random_state=42)
-
-    df_human_bal = _stratified_lang_sample(df_human, target_per_class)
-    df_machine_bal = _stratified_lang_sample(df_machine, target_per_class)
-    
-    logger.info(f"Subset Stats -> Human: {len(df_human_bal)}, Machine: {len(df_machine_bal)}, "
-                f"Hybrid: {len(df_hybrid)}, Adv: {len(df_adversarial)}")
-
-    final_df = pd.concat([df_hybrid, df_adversarial, df_human_bal, df_machine_bal])
-    return final_df.sample(frac=1, random_state=42).reset_index(drop=True)
-
-def get_class_weights(df: pd.DataFrame, device: torch.device) -> torch.Tensor:
-    labels = df['label'].values
-    classes = np.unique(labels)
-    weights = compute_class_weight(class_weight='balanced', classes=classes, y=labels)
-    
-    if len(weights) < 4:
-        logger.warning(f"Warning: Only {len(weights)} classes found for weighting. Padding with 1.0.")
-        full_weights = np.ones(4)
-        for i, c in enumerate(classes):
-            if c < 4: full_weights[c] = weights[i]
-        weights = full_weights
-        
-    return torch.tensor(weights, dtype=torch.float32).to(device)
-
-def get_dynamic_language_map(train_df: pd.DataFrame, val_df: pd.DataFrame) -> Dict[str, int]:
-    """Combines languages from train and val to ensure consistent mapping."""
-    langs_train = set(train_df['language'].unique())
-    langs_val = set(val_df['language'].unique())
-    unique_langs = sorted(list(langs_train.union(langs_val)))
-    
-    mapping = {lang: i for i, lang in enumerate(unique_langs)}
-    logger.info(f"Language Map Created: {len(mapping)} languages.")
-    return mapping
-
-def load_data_for_training(config: dict) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, int]]:
-    logger.info(">>> Loading Data <<<")
-    
-    train_df = load_and_preprocess(config["data"]["train_path"])
-    val_df = load_and_preprocess(config["data"]["val_path"])
-    
-    max_train_samples = config["data"].get("max_training_samples", 200000)
-    train_df = get_smart_subset(train_df, max_total=max_train_samples)
-    
-    train_df = precompute_style_features(train_df)
-    val_df = precompute_style_features(val_df)
-    
-    language_map = get_dynamic_language_map(train_df, val_df)
-    
-    logger.info(f"Final sizes -> Train: {len(train_df)} | Val: {len(val_df)}")
-    
-    return train_df, val_df, language_map
