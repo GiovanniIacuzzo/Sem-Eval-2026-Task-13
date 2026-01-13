@@ -1,53 +1,28 @@
-# ---------------------
-# Dataset Configuration
-# ---------------------
+common:
+  seed: 42
+  project_name: "semeval-task13-subtaskc"
+  
 data:
-  train_path: "data/Task_C/train.parquet"
-  val_path: "data/Task_C/validation.parquet"  
+  data_dir: "data/Task_C_Processed"
   max_length: 512
-  max_training_samples: 200000 
-  balance_languages: false
-  max_code_chars: 15000
+  max_samples_per_class: null
+  num_workers: 4
 
-# ---------------------
-# Model Architecture
-# ---------------------
 model:
-  model_name: "microsoft/graphcodebert-base"
-  num_labels: 4 
-  use_lora: true
-  lora_r: 16
-  lora_alpha: 32
-  extra_dropout: 0.2 
-  num_languages: 12
+  model_name: "microsoft/unixcoder-base" 
+  num_extra_features: 8
+  gradient_checkpointing: true
 
-# ---------------------
-# Training Hyperparameters
-# ---------------------
 training:
-  output_dir: "./results/results_TaskC"
-  checkpoint_dir: "./results/results_TaskC/checkpoints"
-  log_dir: "./results/results_TaskC/logs"
-  num_epochs: 8
-  early_stop_patience: 3 
-  batch_size: 48
-  gradient_accumulation_steps: 2
-  learning_rate: 0.0003
-  evaluation_metric: "f1" 
-  warmup_ratio: 0.1
-  fp16: true
-  label_smoothing: 0.2
-
-# ---------------------
-# Loss Weights
-# ---------------------
-loss_weights:
-  contrastive: 0.2
-  dann: 0.05
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  num_epochs: 15
+  early_stop_patience: 4
+  
   focal_gamma: 2.0
-
-# ---------------------
-# Demo Mode
-# ---------------------
-demo:
-  active: false
+  label_smoothing: 0.1
+  
+  checkpoint_dir: "checkpoints/Task_C"

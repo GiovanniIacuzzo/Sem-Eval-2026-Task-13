@@ -3,7 +3,6 @@ import sys
 import logging
 import yaml
 import torch
-import numpy as np
 import argparse
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
@@ -74,17 +73,20 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
         extra_features = batch["extra_features"].to(device, non_blocking=True)
 
         with autocast(device_type='cuda', dtype=torch.float16):
+            # Model Forward
             logits, loss_task, proj_features = model(
                 input_ids, attention_mask, 
                 labels=labels, 
                 extra_features=extra_features
             )
             
+            # Contrastive Loss (SupCon)
             loss_con = torch.tensor(0.0, device=device)
             if contrastive_fn is not None:
                 loss_con = contrastive_fn(proj_features, labels)
 
-            total_loss = (loss_task + 0.5 * loss_con) / accumulation_steps
+            alpha = 0.5
+            total_loss = (loss_task + alpha * loss_con) / accumulation_steps
 
         scaler.scale(total_loss).backward()
 
@@ -131,11 +133,15 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_dotenv()
-    ConsoleUX.print_banner("SemEval 2026 - Task 13 - Subtask C")
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="src/src_TaskC/config/config.yaml") 
+    parser.add_argument("--stage", type=str, default="detection", 
+                        choices=["detection", "attribution_obf", "end2end"],
+                        help="detection: Clean(0) vs Obf(1) | attribution_obf: Human-Obf(0) vs AI-Obf(1) | end2end: 4 classes")
     args = parser.parse_args()
+
+    ConsoleUX.print_banner(f"SemEval 2026 - Task 13 C - [{args.stage.upper()}]")
 
     # --- 1. SETUP CONFIG & DEVICE ---
     if not os.path.exists(args.config):
@@ -146,23 +152,51 @@ if __name__ == "__main__":
         config = yaml.safe_load(f)
 
     set_seed(config.get("seed", 42))
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Compute Device: {device}")
 
     # =========================================================================
-    # 2. DATA LOADING
+    # 2. DATA PREPARATION
     # =========================================================================
     train_df, val_df = load_data_for_training(config)
     
+    if args.stage == "detection":
+        logger.info("Applying Label Mapping for DETECTION Stage (Clean=0, Obf=1)...")
+        
+        train_df['label'] = train_df['label'].apply(lambda x: 1 if x in [2, 3] else 0)
+        val_df['label'] = val_df['label'].apply(lambda x: 1 if x in [2, 3] else 0)
+        
+        num_labels = 2
+        checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "stage1_detection")
+
+    elif args.stage == "attribution_obf":
+        logger.info("Filtering Data for ATTRIBUTION_OBF Stage (Human-Obf vs AI-Obf)...")
+        
+        train_df = train_df[train_df['label'].isin([2, 3])].copy()
+        val_df = val_df[val_df['label'].isin([2, 3])].copy()
+        
+        label_map = {2: 0, 3: 1}
+        train_df['label'] = train_df['label'].map(label_map)
+        val_df['label'] = val_df['label'].map(label_map)
+        
+        num_labels = 2
+        checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "stage2_attribution_obf")
+        
+    else:
+        logger.info("Training in END-TO-END mode (4 Classes)...")
+        num_labels = 4
+        checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "end2end")
+
+    logger.info(f"Training Samples: {len(train_df)} | Validation Samples: {len(val_df)}")
+    logger.info(f"Class Distribution Train: {train_df['label'].value_counts().to_dict()}")
+
+    config["model"]["num_labels"] = num_labels
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     tokenizer = AutoTokenizer.from_pretrained(config["model"]["model_name"])
     
-    raw_weights = get_class_weights(train_df, device)
-    if raw_weights is not None:
-        logger.info(f"Class Weights (Focal Loss): {raw_weights.cpu().numpy()}")
-    else:
-        logger.warning("Using uniform class weights.")
-        
+    class_weights = get_class_weights(train_df, device)
+    
     # Dataset
     train_dataset = CodeDataset(train_df, tokenizer, max_length=config["data"]["max_length"], is_train=True)
     val_dataset = CodeDataset(val_df, tokenizer, max_length=config["data"]["max_length"], is_train=False)
@@ -176,7 +210,6 @@ if __name__ == "__main__":
         pin_memory=True, 
         drop_last=True
     )
-    
     val_dl = DataLoader(
         val_dataset, 
         batch_size=config["training"]["batch_size"], 
@@ -188,10 +221,10 @@ if __name__ == "__main__":
     # =========================================================================
     # 3. MODEL & EXPERIMENT SETUP
     # =========================================================================
-    model = CodeClassifier(config, class_weights=raw_weights)
+    model = CodeClassifier(config, class_weights=class_weights)
     model.to(device)
 
-    # Comet ML Logging
+    # Comet ML
     api_key = os.getenv("COMET_API_KEY")
     experiment = None
     if api_key:
@@ -202,9 +235,9 @@ if __name__ == "__main__":
             auto_metric_logging=False
         )
         experiment.log_parameters(config)
-        experiment.add_tag("Fusion_SupCon")
+        experiment.add_tag(args.stage)
 
-    # Optimizer & Scheduler
+    # Optimizer
     lr = float(config["training"]["learning_rate"])
     optimizer = torch.optim.AdamW(
         model.parameters(), 
@@ -219,15 +252,10 @@ if __name__ == "__main__":
     total_steps = (len(train_dl) // acc_steps) * num_epochs
     
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=lr,
-        total_steps=total_steps, 
-        pct_start=0.1
+        optimizer, max_lr=lr, total_steps=total_steps, pct_start=0.1
     )
 
-    # Contrastive Loss (SupCon)
-    logger.info("Initializing SupConLoss...")
-    contrastive_fn = losses.SupConLoss(temperature=0.1).to(device)
+    contrastive_fn = losses.SupConLoss(temperature=0.07).to(device)
 
     # =========================================================================
     # 4. TRAINING LOOP
@@ -235,29 +263,27 @@ if __name__ == "__main__":
     best_f1 = 0.0
     patience = config["training"].get("early_stop_patience", 4)
     patience_counter = 0
-    checkpoint_dir = config["training"]["checkpoint_dir"]
-    os.makedirs(checkpoint_dir, exist_ok=True)
 
-    logger.info("Starting Training Loop...")
+    logger.info(f"Starting Training for STAGE: {args.stage}...")
     
     for epoch in range(num_epochs):
-        # --- TRAIN ---
+        # Train
         train_metrics = train_one_epoch(
             model, train_dl, optimizer, scheduler, scaler, device, 
             epoch, accumulation_steps=acc_steps, contrastive_fn=contrastive_fn
         )
         
-        # --- VALIDATION ---
+        # Valid
         val_metrics, _, _ = evaluate(model, val_dl, device, verbose=False)
         
-        # --- LOGGING ---
+        # Log
         ConsoleUX.log_metrics(f"Ep{epoch+1}", val_metrics)
         if experiment:
             experiment.log_metrics(train_metrics, prefix="Train", step=epoch)
             experiment.log_metrics(val_metrics, prefix="Val", step=epoch)
             experiment.log_metric("lr", scheduler.get_last_lr()[0], step=epoch)
 
-        # --- CHECKPOINTING ---
+        # Checkpoint
         current_f1 = val_metrics.get("f1_macro", val_metrics.get("f1", 0.0))
         
         if current_f1 > best_f1:
@@ -268,11 +294,15 @@ if __name__ == "__main__":
             save_path = os.path.join(checkpoint_dir, "best_model.bin")
             torch.save(model.state_dict(), save_path)
             
-            with open(os.path.join(checkpoint_dir, "training_meta.yaml"), "w") as f:
-                yaml.dump({"best_epoch": epoch, "best_f1": best_f1}, f)
+            with open(os.path.join(checkpoint_dir, "model_meta.yaml"), "w") as f:
+                yaml.dump({
+                    "stage": args.stage,
+                    "num_labels": num_labels,
+                    "best_f1": best_f1,
+                    "epoch": epoch
+                }, f)
         else:
             patience_counter += 1
-            logger.info(f"Patience: {patience_counter}/{patience}")
         
         if patience_counter >= patience:
             ConsoleUX.print_banner("EARLY STOPPING TRIGGERED")
@@ -281,4 +311,4 @@ if __name__ == "__main__":
     if experiment:
         experiment.end()
     
-    logger.info("Training Finished Successfully.")
+    logger.info(f"Training for {args.stage} Finished. Model saved in {checkpoint_dir}")

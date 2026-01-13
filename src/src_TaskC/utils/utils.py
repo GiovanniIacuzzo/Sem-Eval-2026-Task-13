@@ -3,7 +3,7 @@ import numpy as np
 import gc
 import logging
 import random
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report, confusion_matrix
 from torch.amp import autocast
 from tqdm import tqdm
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # 0. General Utils
 # -----------------------------------------------------------------------------
 def set_seed(seed: int = 42):
-    """Fissa il seed per la riproducibilità."""
+    """Fissa il seed per la riproducibilità su CPU, GPU e Numpy."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -26,11 +26,14 @@ def set_seed(seed: int = 42):
 # -----------------------------------------------------------------------------
 def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
     """
-    Calcola metriche dettagliate. 
+    Calcola metriche dettagliate.
     Macro F1 è la metrica ufficiale per classi sbilanciate.
     """
     preds = np.array(preds)
     labels = np.array(labels)
+
+    if len(labels) == 0:
+        return {"accuracy": 0.0, "f1_macro": 0.0}
 
     accuracy = accuracy_score(labels, preds)
     
@@ -50,12 +53,13 @@ def compute_metrics(preds: List[int], labels: List[int]) -> Dict[str, float]:
         "recall_macro": float(recall_mac)
     }
 
+    unique_labels = np.unique(np.concatenate([labels, preds]))
     _, _, f1_per_class, _ = precision_recall_fscore_support(
-        labels, preds, average=None, zero_division=0
+        labels, preds, average=None, labels=unique_labels, zero_division=0
     )
 
-    for i, score in enumerate(f1_per_class):
-        metrics[f"f1_class_{i}"] = float(score)
+    for cls_idx, score in zip(unique_labels, f1_per_class):
+        metrics[f"f1_class_{cls_idx}"] = float(score)
 
     return metrics
 
@@ -67,7 +71,7 @@ def evaluate(
     dataloader: torch.utils.data.DataLoader, 
     device: torch.device,
     verbose: bool = False,
-    label_names: List[str] = ["Human", "AI", "Hybrid", "Adv"]
+    label_names: Optional[List[str]] = None
 ) -> Tuple[Dict[str, float], List[int], List[int]]:
     
     model.eval()
@@ -92,7 +96,6 @@ def evaluate(
             input_ids      = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels         = batch["labels"].to(device, non_blocking=True)
-            
             extra_features = batch["extra_features"].to(device, non_blocking=True)
             
             with autocast(device_type=device_type, dtype=dtype):
@@ -117,14 +120,26 @@ def evaluate(
     eval_metrics["loss"] = running_loss / len(dataloader) if len(dataloader) > 0 else 0.0
     
     if verbose:
-        logger.info("\n" + classification_report(
-            references, predictions, 
-            target_names=label_names[:len(set(references) | set(predictions))],
-            zero_division=0,
-            digits=4
-        ))
-        cm = confusion_matrix(references, predictions)
-        logger.info(f"Confusion Matrix:\n{cm}")
+        unique_labels = sorted(list(set(references) | set(predictions)))
+        
+        target_names = None
+        if label_names is not None:
+            if len(label_names) >= len(unique_labels):
+                 target_names = [label_names[i] for i in unique_labels]
+            else:
+                 target_names = label_names
+
+        try:
+            logger.info("\n" + classification_report(
+                references, predictions, 
+                target_names=target_names,
+                zero_division=0,
+                digits=4
+            ))
+            cm = confusion_matrix(references, predictions)
+            logger.info(f"Confusion Matrix:\n{cm}")
+        except Exception as e:
+            logger.warning(f"Could not print classification report: {e}")
 
     if device.type == 'cuda':
         torch.cuda.empty_cache()
