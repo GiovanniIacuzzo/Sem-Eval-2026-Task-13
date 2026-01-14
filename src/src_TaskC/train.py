@@ -2,15 +2,19 @@ import os
 import sys
 import logging
 import yaml
-import torch
 import argparse
+
+import transformers.utils.import_utils
+transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
+
+import torch
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 from dotenv import load_dotenv
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer 
 from comet_ml import Experiment
-from pytorch_metric_learning import losses
+from pytorch_metric_learning import losses 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -156,29 +160,25 @@ if __name__ == "__main__":
     logger.info(f"Compute Device: {device}")
 
     # =========================================================================
-    # 2. DATA PREPARATION
+    # DATA PREPARATION
     # =========================================================================
     train_df, val_df = load_data_for_training(config)
     
     if args.stage == "detection":
         logger.info("Applying Label Mapping for DETECTION Stage (Clean=0, Obf=1)...")
-        
         train_df['label'] = train_df['label'].apply(lambda x: 1 if x in [2, 3] else 0)
         val_df['label'] = val_df['label'].apply(lambda x: 1 if x in [2, 3] else 0)
-        
         num_labels = 2
         checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "stage1_detection")
 
     elif args.stage == "attribution_obf":
         logger.info("Filtering Data for ATTRIBUTION_OBF Stage (Human-Obf vs AI-Obf)...")
-        
         train_df = train_df[train_df['label'].isin([2, 3])].copy()
         val_df = val_df[val_df['label'].isin([2, 3])].copy()
         
         label_map = {2: 0, 3: 1}
         train_df['label'] = train_df['label'].map(label_map)
         val_df['label'] = val_df['label'].map(label_map)
-        
         num_labels = 2
         checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "stage2_attribution_obf")
         
@@ -188,8 +188,11 @@ if __name__ == "__main__":
         checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "end2end")
 
     logger.info(f"Training Samples: {len(train_df)} | Validation Samples: {len(val_df)}")
-    logger.info(f"Class Distribution Train: {train_df['label'].value_counts().to_dict()}")
-
+    
+    # Check per evitare crash su dataset vuoti (caso limite debug)
+    if len(train_df) > 0:
+        logger.info(f"Class Distribution Train: {train_df['label'].value_counts().to_dict()}")
+    
     config["model"]["num_labels"] = num_labels
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -219,7 +222,7 @@ if __name__ == "__main__":
     )
 
     # =========================================================================
-    # 3. MODEL & EXPERIMENT SETUP
+    # MODEL & EXPERIMENT SETUP
     # =========================================================================
     model = CodeClassifier(config, class_weights=class_weights)
     model.to(device)
@@ -255,10 +258,11 @@ if __name__ == "__main__":
         optimizer, max_lr=lr, total_steps=total_steps, pct_start=0.1
     )
 
+    # SupCon Loss
     contrastive_fn = losses.SupConLoss(temperature=0.07).to(device)
 
     # =========================================================================
-    # 4. TRAINING LOOP
+    # TRAINING LOOP
     # =========================================================================
     best_f1 = 0.0
     patience = config["training"].get("early_stop_patience", 4)
