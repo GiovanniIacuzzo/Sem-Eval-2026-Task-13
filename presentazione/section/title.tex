@@ -1,45 +1,65 @@
 \setbeamertemplate{title page}{
     \begin{tikzpicture}[remember picture, overlay]
-        % Sfondo
+        % --- SFONDO ---
         \fill[Obsidian] (current page.south west) rectangle (current page.north east);
-        \shade[inner color=VividViolet!20, outer color=Obsidian, opacity=0.6] 
-            ([xshift=-2cm, yshift=2cm]current page.south east) circle (8cm);
-        \shade[inner color=CyanGlow!10, outer color=Obsidian, opacity=0.4] 
-            ([xshift=3cm, yshift=-3cm]current page.north west) circle (6cm);
         
-        % Decorazioni
-        \begin{scope}[shift={(10, -2)}, opacity=0.4]
-            \draw[white!20, thin] (0,0) -- (2,3) -- (4,1) -- (2,-2) -- cycle;
-            \draw[white!20, thin] (2,3) -- (5,4) -- (4,1);
-            \foreach \x/\y in {0/0, 2/3, 4/1, 2/-2, 5/4} {
+        % Sfumature "Cyber"
+        \shade[inner color=VividViolet!25, outer color=Obsidian, opacity=0.5] 
+            ([xshift=-2cm, yshift=2cm]current page.south east) circle (9cm);
+        \shade[inner color=CyanGlow!15, outer color=Obsidian, opacity=0.3] 
+            ([xshift=3cm, yshift=-3cm]current page.north west) circle (7cm);
+        
+        % --- DECORAZIONE TEMATICA (CODE & NETWORK) ---
+        \begin{scope}[shift={(10, -1.5)}, opacity=0.3]
+            % Grafo neurale stilizzato
+            \draw[white!20, thin] (0,0) -- (1.5, 2.5) -- (3.5, 0.5) -- (1.5,-2) -- cycle;
+            \draw[white!20, thin] (1.5, 2.5) -- (4.5, 3.5) -- (3.5, 0.5);
+            \draw[CyanGlow!30, thin, dashed] (0,0) -- (3.5, 0.5); % Link diretto
+            
+            % Nodi
+            \foreach \x/\y in {0/0, 1.5/2.5, 3.5/0.5, 1.5/-2, 4.5/3.5} {
+                \fill[Obsidian] (\x,\y) circle (3.5pt); % Bordo
                 \fill[white] (\x,\y) circle (2.5pt);
                 \fill[CyanGlow] (\x,\y) circle (1.5pt);
             }
+            
+            % Simboli di codice fluttuanti (Contesto Task 13)
+            \node[text=white!10, font=\tiny\ttfamily, rotate=15] at (-1, 2) {<code/>};
+            \node[text=white!10, font=\tiny\ttfamily, rotate=-10] at (2, -1) {def classify():};
+            \node[text=white!10, font=\tiny\ttfamily] at (4, 2) {\{ \}};
         \end{scope}
 
-        % Header
-        \node[anchor=north west, align=left, text width=0.75\paperwidth] at ([xshift=1.2cm, yshift=-0.2cm]current page.north west) {
+        % --- HEADER ---
+        \node[anchor=north west, align=left, text width=0.8\paperwidth] at ([xshift=1.2cm, yshift=-0.2cm]current page.north west) {
+            % Nome Competizione
             {\color{CyanGlow}\fontseries{b}\selectfont \scriptsize \uppercase{SemEval-2026 // Task 13}}\par
             \vspace{0.15cm}
+            
+            % Titolo Principale
             {\fontsize{32}{38}\selectfont \color{white}\textbf{GenAI Code}\\[0.1em] \textbf{Detection \&}\\[0.1em] \textbf{Attribution}}\par
-            \vspace{0.2cm}
+            \vspace{0.3cm}
+            
+            % Sottotitolo Partecipazione (IMPORTANTE)
             \begin{tikzpicture}
-                \fill[VividViolet] (0,0) rectangle (1.5, 0.06); 
-                \fill[gray!60] (1.7,0) rectangle (2.3, 0.06);
+                \fill[VividViolet] (0,0) rectangle (0.8, 0.06); 
+                \fill[gray!60] (1.0,0) rectangle (2.5, 0.06);
             \end{tikzpicture}\par
-            \vspace{0.15cm}
-            {\color{gray!50}\small Speech \& Language Processing Exam}\par
+            \vspace{0.2cm}
+            {\color{white!90}\footnotesize \faCheckCircle[regular]\ \textbf{Full Participation:} Subtasks 1, 2 \& 3}\par
+            \vspace{0.1cm}
+            {\color{gray!50}\scriptsize Speech \& Language Processing Exam}\par
         };
 
-        % Footer
+        % Footer corretto
         \node[anchor=south west, align=left, text width=0.85\paperwidth] at ([xshift=1.2cm, yshift=0.6cm]current page.south west) {
             {\color{white}\LARGE \bfseries Giovanni Giuseppe Iacuzzo}\par
             \vspace{0.1cm}
-            {\color{white!90!gray}\large Università degli Studi di Enna ``Kore''}\par
-            \vspace{0.1cm}
-            {\color{gray!60}\small AI \& Cybersecurity Student} 
-            \hspace{0.2cm} {\color{CyanGlow}$\cdot$} \hspace{0.2cm} 
+            {\color{white!80!gray}\large Università degli Studi di Enna ``Kore''}\par
+            \vspace{0.15cm} 
+            \begin{tabular}{@{}l@{\hspace{0.5cm}}l@{}}
+            {\color{gray!60}\small \faUserGraduate\ AI \& Cybersecurity Student} &
             {\color{CyanGlow}\small \faGithub\ \href{https://github.com/giovanniIacuzzo}{giovanniIacuzzo}}
+            \end{tabular}
         };
     \end{tikzpicture}
 }

@@ -4,201 +4,314 @@
 % ---------------------------------------------------
 % SLIDE 1: IL CONTESTO
 % ---------------------------------------------------
-\begin{frame}{Il Nuovo Paradigma: GenAI Code}
-    \vspace{0.2cm}
+\begin{frame}{Il Contesto: Perché SemEval Task 13?}
     
-    % Contenitore superiore
     \begin{tcolorbox}[
-        colback=white, colframe=Obsidian, 
-        title=\textbf{\faExclamationTriangle \ \ The Rise of LLMs},
-        fonttitle=\bfseries\normalsize, coltitle=white,
-        enhanced, attach boxed title to top left={xshift=0.5cm, yshift=-2mm},
-        boxed title style={colback=VividViolet, sharp corners},
-        boxrule=0.5pt, drop fuzzy shadow
+        enhanced, colback=white, colframe=Obsidian, 
+        borderline west={4pt}{0pt}{VividViolet}, 
+        boxrule=0.5pt, drop fuzzy shadow,
+        arc=2pt, left=6pt, right=6pt, top=4pt, bottom=4pt
     ]
-        L'evoluzione di modelli come \textbf{GPT-4, Llama-3 e StarCoder} ha reso il codice sintetico indistinguibile da quello umano. Questo fenomeno introduce rischi critici per la \textbf{sicurezza software}, il \textbf{copyright} e l'integrità dei sistemi.
+        \small
+        La generazione di codice tramite LLM (GPT-4, StarCoder) è pervasiva. Tuttavia, i detector attuali sono fragili: funzionano bene su ciò che conoscono (Python, Java), ma crollano appena cambia il contesto.
     \end{tcolorbox}
     
-    \vspace{0.3cm}
-
-    % Visualizzazione Concettuale
-    \begin{center}
-    \begin{tikzpicture}
-        % 1. Nodo Umano
-        \node[align=center] (human) at (0,0) {
-            \color{Obsidian}\Huge\faUser\\
-            \small\textbf{Human Code}\\
-            \scriptsize(Creativity, Bugs)}
-        ;
+    \vspace{0.2cm}
+    
+    \textbf{Le sfide aperte:}
+    \vspace{0.1cm}
+    
+    \begin{itemize}
+        \setlength\itemsep{0.6em} 
         
-        % 2. Nodo AI
-        \node[align=center] (ai) at (8,0) {
-            \color{NeonPurple}\Huge\faRobot\\
-            \small\textbf{GenAI Code}\\
-            \scriptsize(Speed, Patterns)}
-        ;
+        \item[\color{CyanGlow}\faGlobe] \textbf{Il problema O.O.D. (Out-Of-Distribution):}
+        \\ 
+        \footnotesize
+        La maggior parte dei dataset contiene codice "Algoritmico" (LeetCode). Nel mondo reale, il codice è vario (Web, Embedded) e scritto in linguaggi rari (Go, PHP, C\#).
         
-        % 3. Freccia "Indistinguishable"
-        \onslide<2->{
-            \draw[->, line width=2pt, draw=gray!30] (human) -- (ai) node[midway, above] {\color{DarkText}\textbf{Indistinguishable?}};
-        }
+        \item[\color{CyanGlow}\faUserSecret] \textbf{Attribuzione e Copyright:}
+        \\
+        \footnotesize
+        Non basta sapere \textit{se} è stato generato da un'AI. Per questioni legali, dobbiamo sapere \textit{quale} modello lo ha creato (OpenAI vs Open Source).
         
-        % 4. Box Soluzione
-        \onslide<3->{
-            \node[draw=NeonPurple, fill=white, rounded corners, inner sep=10pt, drop shadow] at (4, -1.5) {
-                \begin{minipage}{0.6\textwidth}
-                    \centering
-                    \color{VividViolet}\textbf{SemEval-2026 Task 13}\\
-                    \color{gray}\scriptsize Detect $\cdot$ Attribute $\cdot$ Analyze
-                \end{minipage}
-            };
-        }
-    \end{tikzpicture}
-    \end{center}
+        \item[\color{CyanGlow}\faRandom] \textbf{Scenari Ibridi e Avversari:}
+        \\
+        \footnotesize
+        Il codice non è più binario (0 o 1). Esiste il codice misto (Human + Co-pilot) e il codice generato appositamente per ingannare i detector (Adversarial).
+    \end{itemize}
 \end{frame}
 
 % ---------------------------------------------------
-% SLIDE 2: LE 3 SFIDE CHIAVE
+% SLIDE 2: SUBTASK A
 % ---------------------------------------------------
-\begin{frame}{Obiettivi della Competizione}
-    \vspace{0.1cm}
-    La Task 13 risponde a tre esigenze fondamentali dell'industria moderna:
-    \vspace{0.3cm}
+\begin{frame}{Subtask A: Binary Detection \& OOD}
     
-    \begin{columns}[t, onlytextwidth]
+    \begin{columns}[T]
         
-        % CARD 1: SECURITY
-        \column{0.32\textwidth}
-        \onslide<1->{
+        \begin{column}{0.55\textwidth}
+            
             \begin{tcolorbox}[
-                enhanced, colback=white, colframe=gray!10, 
-                coltitle=Obsidian, title=\centering\Large\faLock, 
-                fonttitle=\bfseries, arc=5pt,
-                borderline={0pt}{0pt}{white},
-                shadow={2mm}{-2mm}{0mm}{black!5},
-                top=5pt
+                colback=gray!5, colframe=gray!20, boxrule=0.5pt, 
+                left=2pt, right=2pt, top=2pt, bottom=2pt,
+                arc=2pt
             ]
-                \centering
-                \textbf{\color{VividViolet}Sicurezza}\\
-                \vspace{0.2cm}
-                \scriptsize
-                Prevenire vulnerabilità introdotte da codice generato (Hallucinations) in sistemi critici.
+                \centering \scriptsize
+                \textbf{\faDatabase \ Dataset:} 500k Train / 100k Val 
+                \hspace{0.2cm} $\cdot$ \hspace{0.2cm} 
+                \textbf{\faChartBar \ Metric:} Macro F1
             \end{tcolorbox}
-        }
-
-        % CARD 2: ATTRIBUTION
-        \column{0.32\textwidth}
-        \onslide<2->{
-            \begin{tcolorbox}[
-                enhanced, colback=white, colframe=gray!10, 
-                coltitle=Obsidian, title=\centering\Large\faCopyright,
-                fonttitle=\bfseries, arc=5pt,
-                borderline={0pt}{0pt}{white},
-                shadow={2mm}{-2mm}{0mm}{black!5},
-                top=5pt
-            ]
-                \centering
-                \textbf{\color{VividViolet}Attribuzione}\\
-                \vspace{0.2cm}
+            
+            \vspace{0.1cm}
+            
+            \textbf{\small \faAdjust \ Il Core Task}
+            \par\vspace{0.1cm}
+            \footnotesize
+            Classificazione binaria: il codice è stato scritto da un umano o generato da un LLM? La difficoltà non sta nella classificazione in sé, ma nella \textbf{Robustezza}.
+            \vspace{0.3cm}
+            
+            \textbf{\small \faExpand \ Le Dimensioni della Generalizzazione:}
+            \vspace{0.1cm}
+            \begin{description}
+                \setlength\itemsep{0.5em}
+                
+                \item[\color{VividViolet}\scriptsize \faCode \ Language Shift] 
                 \scriptsize
-                Identificare il modello specifico (es. Llama vs OpenAI) per licensing e proprietà intellettuale.
-            \end{tcolorbox}
-        }
-
-        % CARD 3: HYBRID ANALYSIS
-        \column{0.32\textwidth}
-        \onslide<3->{
-            \begin{tcolorbox}[
-                enhanced, colback=white, colframe=gray!10, 
-                coltitle=Obsidian, title=\centering\Large\faCodeBranch,
-                fonttitle=\bfseries, arc=5pt,
-                borderline={0pt}{0pt}{white},
-                shadow={2mm}{-2mm}{0mm}{black!5},
-                top=5pt
-            ]
-                \centering
-                \textbf{\color{VividViolet}Analisi Ibrida}\\
-                \vspace{0.2cm}
+                Il modello si allena su linguaggi "standard" (\textit{Python, Java}) ma deve funzionare su sintassi completamente diverse (\textit{Go, PHP}). 
+                \textit{Deve imparare la semantica, non la sintassi.}
+                
+                \item[\color{VividViolet}\scriptsize \faIndustry \ Domain Shift] 
                 \scriptsize
-                Gestire scenari complessi: codice misto Uomo-AI, Refactoring e Codice Avversario.
-            \end{tcolorbox}
-        }
-
+                \textbf{Train:} Codice algoritmico "pulito" (LeetCode).
+                \\
+                \textbf{Test:} Codice di \textit{Produzione} (sporco, dipendenze, commenti reali).
+            \end{description}
+            
+            \vspace{0.2cm}
+            \tiny \textit{*Obiettivo: Evitare il "memorization overfitting".}
+        \end{column}
+        
+        \begin{column}{0.43\textwidth}
+            \vspace{0.3cm} 
+            \centering
+            \begin{tikzpicture}[scale=0.68, transform shape]
+                \draw[thick, gray!20] (0,0) grid (6,6);
+                
+                \node[rotate=90, font=\bfseries\color{Obsidian}] at (-0.6, 3) {LANGUAGES};
+                \node[font=\bfseries\color{Obsidian}] at (3, 6.6) {DOMAINS};
+                
+                \fill[gray!10] (0,3) rectangle (3,6);
+                \node[align=center] at (1.5, 4.5) {\faCheckCircle\\ \textbf{SEEN}\\(Baseline)};
+                
+                \fill[white] (3,3) rectangle (6,6);
+                \node[align=center] at (4.5, 4.5) {\faIndustry\\ \textbf{Domain}\\\textbf{Shift}};
+                
+                \fill[white] (0,0) rectangle (3,3);
+                \node[align=center] at (1.5, 1.5) {\faCode\\ \textbf{New}\\\textbf{Langs}};
+                
+                \fill[VividViolet!15] (3,0) rectangle (6,3);
+                \draw[VividViolet, thick] (3,0) rectangle (6,3);
+                \node[align=center, text=Obsidian] at (4.5, 1.5) {\faExclamationTriangle\\ \textbf{FULL}\\\textbf{OOD}};
+                
+                \node[above, font=\tiny] at (1.5, 6) {ALGORITHMIC};
+                \node[above, font=\tiny] at (4.5, 6) {RESEARCH};
+                \node[left, font=\tiny, rotate=90] at (-0.2, 4.5) {PY/JAVA};
+                \node[left, font=\tiny, rotate=90] at (-0.2, 1.5) {GO/PHP};
+            \end{tikzpicture}
+        \end{column}
     \end{columns}
 \end{frame}
 
 % ---------------------------------------------------
-% SLIDE 3: STRUTTURA DEI SUBTASKS
+% SLIDE 3: SUBTASK B
 % ---------------------------------------------------
-\begin{frame}{Struttura del Progetto: I 3 Moduli}
+\begin{frame}{Subtask B: Fine-Grained Attribution}
     
-    \vspace{0.1cm}
-    Una pipeline unificata per affrontare i tre livelli di complessità del task:
-    \vspace{0.2cm}
+    \begin{columns}[T]
+        
+        \begin{column}{0.55\textwidth}
+            
+            \textbf{\small \faFingerprint \ Authorship Forensics}
+            \vspace{0.1cm}
+            \footnotesize
+            Non basta distinguere Umano vs Macchina. Il sistema deve riconoscere l'\textbf{impronta stilistica unica} di ogni famiglia di modelli (es. come \textit{Llama} gestisce i cicli vs come li fa \textit{DeepSeek}).
+            
+            \vspace{0.3cm}
+            
+            \textbf{\small \faBalanceScale \ Extreme Class Imbalance}
+            \par\vspace{0.1cm}
+            \scriptsize
+            Il dataset è fortemente sbilanciato verso il codice umano, rendendo difficile per il modello apprendere le sfumature delle classi minoritarie (AI).
+            \vspace{0.1cm}
+            
+            \begin{tikzpicture}
+                \node[anchor=west, font=\tiny\bfseries] at (0, 0.4) {HUMAN (442k)};
+                \fill[gray!30, rounded corners=2pt] (0,0) rectangle (4.5, 0.25);
+                \fill[Obsidian, rounded corners=2pt] (0,0) rectangle (4.0, 0.25);
+                
+                \node[anchor=west, font=\tiny\bfseries] at (0, -0.1) {SINGLE AI FAMILY (~4k)};
+                \fill[gray!30, rounded corners=2pt] (0,-0.5) rectangle (4.5, -0.25);
+                \fill[VividViolet, rounded corners=2pt] (0,-0.5) rectangle (0.4, -0.25);
+            \end{tikzpicture}
+            
+            \vspace{0.3cm}
+            
+            \textbf{\small \faUserSecret \ The "Unseen" Trap}
+            \par\vspace{0.05cm}
+            \scriptsize
+            Test su \textbf{nuove versioni} di famiglie note.
+            \\
+            \textit{Esempio:} Train su \texttt{Llama-2} $\to$ Test su \texttt{Llama-3}. Il modello deve generalizzare lo "stile Llama" oltre la specifica versione.
+        \end{column}
+        
+        \begin{column}{0.45\textwidth}
+            \vspace{0.2cm}
+            \centering
+            
+            \begin{tcolorbox}[
+                colback=white, colframe=gray!10, 
+                title=\textbf{\small \faServer \ Target Families (10+1)},
+                coltitle=Obsidian, fonttitle=\bfseries,
+                halign=center, arc=5pt, boxrule=1pt,
+                drop fuzzy shadow
+            ]
+                \centering
+                \begin{tikzpicture}[
+                    chip/.style={
+                        rectangle, 
+                        draw=CyanGlow, 
+                        fill=CyanGlow!5, 
+                        rounded corners=3pt, 
+                        minimum width=1.8cm, 
+                        minimum height=0.6cm,
+                        font=\tiny\bfseries\color{Obsidian},
+                        align=center
+                    },
+                    human/.style={
+                        rectangle, 
+                        draw=VividViolet, 
+                        fill=VividViolet!10, 
+                        rounded corners=3pt, 
+                        minimum width=3.8cm, 
+                        minimum height=0.7cm,
+                        font=\scriptsize\bfseries\color{Obsidian}
+                    }
+                ]
+                    \node[chip] (m1) at (0,0) {DeepSeek};
+                    \node[chip] (m2) at (2.1,0) {Qwen};
+                    
+                    \node[chip] (m3) at (0,-0.8) {01-ai};
+                    \node[chip] (m4) at (2.1,-0.8) {BigCode};
+                    
+                    \node[chip] (m5) at (0,-1.6) {Gemma};
+                    \node[chip] (m6) at (2.1,-1.6) {Phi};
+                    
+                    \node[chip] (m7) at (0,-2.4) {LLaMA};
+                    \node[chip] (m8) at (2.1,-2.4) {Granite};
+                    
+                    \node[chip] (m9) at (0,-3.2) {Mistral};
+                    \node[chip] (m10) at (2.1,-3.2) {OpenAI};
+                    
+                    \node[human] (hum) at (1.05, -4.2) {\faUser \ HUMAN CODE};
+                    
+                    \draw[gray!20, thin] (m9.south) -- (hum.north);
+                    \draw[gray!20, thin] (m10.south) -- (hum.north);
+                    
+                \end{tikzpicture}
+            \end{tcolorbox}
+        \end{column}
+        
+    \end{columns}
+\end{frame}
 
-    % SUBTASK A
-    \onslide<1->{
-        \begin{tcolorbox}[
-            enhanced, colback=white, 
-            frame style={left color=VividViolet, right color=NeonPurple},
-            coltitle=white, title=\textbf{Subtask A $\cdot$ Binary Detection},
-            fonttitle=\bfseries\scriptsize, 
-            leftrule=4mm, boxrule=0pt, arc=2pt,
-            drop fuzzy shadow,
-            top=2pt, bottom=2pt
-        ]
-            \begin{columns}
-                \column{0.08\textwidth} \centering \color{white}\faAdjust
-                \column{0.92\textwidth} 
-                \scriptsize 
-                \textbf{Human vs Machine.} \\
-                Classificazione binaria su 500K sample. Include scenari \textit{Unseen Languages} (es. Go, PHP) e \textit{Unseen Domains}.
-            \end{columns}
-        \end{tcolorbox}
-    }
-    \vspace{0.05cm}
+% ---------------------------------------------------
+% SLIDE 4: SUBTASK C
+% ---------------------------------------------------
+\begin{frame}{Subtask C: The Real-World Scenario}
+    
+    \begin{columns}[T]
+        
+        \begin{column}{0.55\textwidth}
+            
+            \begin{tcolorbox}[
+                colback=gray!5, colframe=gray!20, boxrule=0.5pt, 
+                left=2pt, right=2pt, top=2pt, bottom=2pt, arc=2pt
+            ]
+                \centering \scriptsize
+                \textbf{\faDatabase \ Max Dataset:} 900k Samples 
+                \hspace{0.1cm} $\cdot$ \hspace{0.1cm} 
+                \textbf{\faThLarge \ 4 Classes}
+            \end{tcolorbox}
+            
+            \vspace{0.1cm}
+            \small
+            Oltre alla distinzione binaria, introduciamo le \textbf{Zone Grigie} dello sviluppo software moderno.
+            
+            \vspace{0.2cm}
+            
+            \textbf{\small \faHandshake \ Class 2: HYBRID (Mixed)}
+            \par\vspace{0.05cm}
+            \scriptsize
+            \textit{"Augmented Intelligence".} Codice nato dalla collaborazione: l'umano scrive la logica core, l'AI (Copilot) completa il boilerplate (o viceversa).
+            \\ \color{gray} $\to$ Sfida: Rilevare i punti di transizione nello stesso file.
+            
+            \vspace{0.3cm}
+            
+            \textbf{\small \faUserSecret \ Class 3: ADVERSARIAL}
+            \par\vspace{0.05cm}
+            \scriptsize
+            \textit{"Evasion Attacks".} Codice interamente AI, ma generato tramite tecniche avanzate (\textit{RLHF, Prompt Engineering}) per \textbf{imitare} lo stile e gli errori umani.
+            \\ \color{gray} $\to$ Sfida: Distinguere la "naturalezza" umana dalla "simulazione".
+        \end{column}
+        
+        \begin{column}{0.45\textwidth}
+            \vspace{0.2cm}
+            \centering
+            
+            \begin{tikzpicture}[scale=0.8, transform shape,
+                box/.style={
+                    rectangle, rounded corners=3pt,
+                    minimum width=2.2cm, minimum height=0.8cm,
+                    align=center, drop shadow, font=\scriptsize\bfseries
+                },
+                arrow/.style={->, >=stealth, thick, gray!40}
+            ]
+                \node[box, draw=gray, fill=white] (hum) at (0, 0) {
+                    \faUser \ HUMAN\\ \tiny (Class 0)
+                };
+                
+                \node[box, draw=gray, fill=white] (mac) at (3, 0) {
+                    \faRobot \ MACHINE\\ \tiny (Class 1)
+                };
+                
+                \node[box, draw=VividViolet, fill=VividViolet!5] (hyb) at (1.5, -2) {
+                    \faHandshake \ HYBRID\\ \tiny (Class 2)
+                };
+                
+                \node[box, draw=CyanGlow, fill=CyanGlow!5] (adv) at (3, -3.5) {
+                    \faMask \ ADVERSARIAL\\ \tiny (Class 3)
+                };
 
-    % SUBTASK B
-    \onslide<2->{
-        \begin{tcolorbox}[
-            enhanced, colback=white, 
-            frame style={left color=Obsidian, right color=Charcoal},
-            coltitle=white, title=\textbf{Subtask B $\cdot$ Attribution},
-            fonttitle=\bfseries\scriptsize, 
-            leftrule=4mm, boxrule=0pt, arc=2pt,
-            drop fuzzy shadow,
-            top=2pt, bottom=2pt
-        ]
-            \begin{columns}
-                \column{0.08\textwidth} \centering \color{white}\faFingerprint
-                \column{0.92\textwidth} 
-                \scriptsize 
-                \textbf{Multi-Class (11 Families).} \\
-                Identificazione fine-grained dell'autore (Human, GPT, Llama, Mistral, ecc.). Sfida: Forti sbilanciamenti di classe.
-            \end{columns}
-        \end{tcolorbox}
-    }
-    \vspace{0.05cm}
+                \draw[arrow] (hum.south) -- +(0,-0.5) -| (hyb.north);
+                \draw[arrow] (mac.south) -- +(0,-0.5) -| (hyb.north);
+                
+                \draw[arrow, dashed, color=CyanGlow] (mac.south) -- (adv.north) 
+                    node[midway, right, font=\tiny, align=left, text=CyanGlow] {Obfuscation\\\& RLHF};
+                
+                \node[font=\tiny, text=gray, align=center] at (1.5, -1.2) {Co-Creation};
 
-    % SUBTASK C
-    \onslide<3->{
-        \begin{tcolorbox}[
-            enhanced, colback=white, 
-            frame style={left color=CyanGlow!80!blue, right color=CyanGlow},
-            coltitle=white, title=\textbf{Subtask C $\cdot$ Hybrid Analysis},
-            fonttitle=\bfseries\scriptsize, 
-            leftrule=4mm, boxrule=0pt, arc=2pt,
-            drop fuzzy shadow,
-            top=2pt, bottom=2pt
-        ]
-            \begin{columns}
-                \column{0.08\textwidth} \centering \color{white}\faRandom
-                \column{0.92\textwidth} 
-                \scriptsize 
-                \textbf{Mixed \& Adversarial (4 Classi).} \\
-                Classificazione complessa: Human, Machine, Hybrid (Mixed) e Adversarial (Codice offuscato). 900K sample.
-            \end{columns}
-        \end{tcolorbox}
-    }
-
+            \end{tikzpicture}
+            
+            \vspace{0.3cm}
+            
+            \begin{tcolorbox}[
+                colback=white, colframe=gray!10, boxrule=0.5pt,
+                width=0.9\textwidth, arc=2pt, left=2pt
+            ]
+                \tiny \centering
+                \faExclamationTriangle \ \textbf{Difficulty:} Adversarial code is mathematically closer to Human distribution than standard Machine code.
+            \end{tcolorbox}
+            
+        \end{column}
+        
+    \end{columns}
 \end{frame}
