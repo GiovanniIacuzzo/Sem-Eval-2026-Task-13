@@ -140,12 +140,12 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="src/src_TaskC/config/config.yaml") 
-    parser.add_argument("--stage", type=str, default="detection", 
-                        choices=["detection", "attribution_obf", "end2end"],
-                        help="detection: Clean(0) vs Obf(1) | attribution_obf: Human-Obf(0) vs AI-Obf(1) | end2end: 4 classes")
+    parser.add_argument("--stage", type=str, default="binary_human_machine", 
+                        choices=["binary_human_machine", "machine_attribution", "end2end"],
+                        help="binary_human_machine: Human(0) vs Machine(1,2,3) | machine_attribution: AI(1) vs Hybrid(2) vs Adv(3) | end2end: 4 classes")
     args = parser.parse_args()
 
-    ConsoleUX.print_banner(f"SemEval 2026 - Task 13 C - [{args.stage.upper()}]")
+    ConsoleUX.print_banner(f"SemEval 2026 Task 13C - Strategy: [{args.stage.upper()}]")
 
     # --- 1. SETUP CONFIG & DEVICE ---
     if not os.path.exists(args.config):
@@ -164,34 +164,53 @@ if __name__ == "__main__":
     # =========================================================================
     train_df, val_df = load_data_for_training(config)
     
-    if args.stage == "detection":
-        logger.info("Applying Label Mapping for DETECTION Stage (Clean=0, Obf=1)...")
-        train_df['label'] = train_df['label'].apply(lambda x: 1 if x in [2, 3] else 0)
-        val_df['label'] = val_df['label'].apply(lambda x: 1 if x in [2, 3] else 0)
-        num_labels = 2
-        checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "stage1_detection")
+    current_label_map = {} # Per salvare nei metadati
 
-    elif args.stage == "attribution_obf":
-        logger.info("Filtering Data for ATTRIBUTION_OBF Stage (Human-Obf vs AI-Obf)...")
-        train_df = train_df[train_df['label'].isin([2, 3])].copy()
-        val_df = val_df[val_df['label'].isin([2, 3])].copy()
+    if args.stage == "binary_human_machine":
+        logger.info("Setting up STAGE 1: Binary Classification (Human vs Machine)...")
         
-        label_map = {2: 0, 3: 1}
-        train_df['label'] = train_df['label'].map(label_map)
-        val_df['label'] = val_df['label'].map(label_map)
+        def map_binary(x):
+            return 0 if x == 0 else 1
+            
+        train_df['label'] = train_df['label'].apply(map_binary)
+        val_df['label'] = val_df['label'].apply(map_binary)
+        
         num_labels = 2
-        checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "stage2_attribution_obf")
+        checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "stage1_binary_human_machine")
+        current_label_map = {"0": "Human", "1": "Machine (AI/Hybrid/Adv)"}
+
+    elif args.stage == "machine_attribution":
+        logger.info("Setting up STAGE 2: Attribution (AI vs Hybrid vs Adversarial)...")
+        
+        train_df = train_df[train_df['label'] != 0].copy()
+        val_df = val_df[val_df['label'] != 0].copy()
+        
+        attribution_map = {1: 0, 2: 1, 3: 2}
+        
+        train_df['label'] = train_df['label'].map(attribution_map)
+        val_df['label'] = val_df['label'].map(attribution_map)
+        
+        num_labels = 3
+        checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "stage2_machine_attribution")
+        current_label_map = {"0": "AI-Generated", "1": "Hybrid", "2": "Adversarial"}
         
     else:
-        logger.info("Training in END-TO-END mode (4 Classes)...")
+        # ---------------------------------------------------------
+        # END-TO-END
+        # ---------------------------------------------------------
+        logger.info("Setting up END-TO-END mode (4 Classes)...")
         num_labels = 4
         checkpoint_dir = os.path.join(config["training"]["checkpoint_dir"], "end2end")
+        current_label_map = {"0": "Human", "1": "AI", "2": "Hybrid", "3": "Adversarial"}
 
     logger.info(f"Training Samples: {len(train_df)} | Validation Samples: {len(val_df)}")
     
-    # Check per evitare crash su dataset vuoti (caso limite debug)
     if len(train_df) > 0:
         logger.info(f"Class Distribution Train: {train_df['label'].value_counts().to_dict()}")
+        logger.info(f"Label Semantics: {current_label_map}")
+    else:
+        logger.error("Dataset vuoto dopo il filtraggio! Controlla i dati.")
+        sys.exit(1)
     
     config["model"]["num_labels"] = num_labels
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -239,6 +258,7 @@ if __name__ == "__main__":
         )
         experiment.log_parameters(config)
         experiment.add_tag(args.stage)
+        experiment.log_parameter("label_map", str(current_label_map))
 
     # Optimizer
     lr = float(config["training"]["learning_rate"])
@@ -303,7 +323,8 @@ if __name__ == "__main__":
                     "stage": args.stage,
                     "num_labels": num_labels,
                     "best_f1": best_f1,
-                    "epoch": epoch
+                    "epoch": epoch,
+                    "label_map_training": current_label_map
                 }, f)
         else:
             patience_counter += 1
