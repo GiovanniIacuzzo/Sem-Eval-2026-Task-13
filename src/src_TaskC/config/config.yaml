@@ -4,7 +4,7 @@ common:
   
 data:
   data_dir: "data/Task_C_Processed"
-  max_length: 512
+  max_length: 384
   max_samples_per_class: null
   num_workers: 4
 
@@ -14,8 +14,8 @@ model:
   gradient_checkpointing: true
 
 training:
-  batch_size: 8
-  gradient_accumulation_steps: 4
+  batch_size: 32
+  gradient_accumulation_steps: 2
   
   learning_rate: 2.0e-5
   weight_decay: 0.01

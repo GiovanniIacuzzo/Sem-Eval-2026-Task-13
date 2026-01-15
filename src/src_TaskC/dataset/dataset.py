@@ -42,15 +42,22 @@ def get_class_weights(df, device):
 
 
 def load_data_for_training(config):
-    """
-    Carica i dati grezzi dai parquet.
-    """
     data_dir = config["data"].get("data_dir", "data/Task_C_Processed")
-    train_path = os.path.join(data_dir, "train_processed.parquet")
-    val_path = os.path.join(data_dir, "val_processed.parquet")
     
-    if not os.path.exists(train_path) or not os.path.exists(val_path):
-        raise FileNotFoundError(f"Non trovo i file parquet in {data_dir}.")
+    train_path = os.path.join(data_dir, "featured_train_processed.parquet")
+    val_path = os.path.join(data_dir, "featured_val_processed.parquet")
+    
+    if not os.path.exists(train_path):
+        logger.warning(f"File ottimizzato {train_path} non trovato. Provo quello standard...")
+        train_path = os.path.join(data_dir, "train_processed.parquet")
+    else:
+        logger.info(f"Trovato dataset ottimizzato: {train_path}")
+
+    if not os.path.exists(val_path):
+        val_path = os.path.join(data_dir, "val_processed.parquet")
+
+    if not os.path.exists(train_path):
+        raise FileNotFoundError(f"Non trovo file parquet in {data_dir}")
 
     logger.info(f"Loading Training Data from {train_path}...")
     train_df = pd.read_parquet(train_path)
@@ -73,13 +80,8 @@ def load_data_for_training(config):
 # =============================================================================
 # 2. DATASET LAZY LOADING
 # =============================================================================
-
 class CodeDataset(Dataset):
     def __init__(self, dataframe, tokenizer, max_length=512, is_train=False):
-        """
-        Inizializzazione leggera: salviamo solo i dati grezzi.
-        Tutto il processing pesante avviene in __getitem__.
-        """
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.is_train = is_train
@@ -87,41 +89,52 @@ class CodeDataset(Dataset):
         # Filtriamo subito eventuali righe corrotte
         dataframe = dataframe.dropna(subset=['code', 'label']).copy()
         
-        # Salviamo in liste native
+        # 1. Carichiamo Codice e Label
         self.codes = dataframe['code'].astype(str).tolist()
         self.labels = dataframe['label'].astype(int).tolist()
         
-        # Pre-fetch del pad_token_id per efficienza
+        # 2. Gestione Feature Pre-calcolate
+        if 'extra_features' in dataframe.columns:
+            logger.info("⚡ Utilizzo features pre-calcolate")
+            self.extra_features = dataframe['extra_features'].tolist()
+        else:
+            logger.warning(" Features pre-calcolate NON trovate. Calcolo on-the-fly attivo.")
+            self.extra_features = None
+        
         self.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        # 1. Recupero Dati Grezzi
+        # A. Recupero Feature Stilistiche
+        if self.extra_features is not None:
+            feats_data = self.extra_features[idx]
+            if isinstance(feats_data, np.ndarray):
+                feats_data = feats_data.tolist()
+            extra_features = torch.tensor(feats_data, dtype=torch.float)
+        else:
+            extra_features = self._extract_robust_features(self.codes[idx])
+
+        # B. Tokenizzazione
         code = self.codes[idx]
         label = self.labels[idx]
-        
-        # 2. Estrazione Feature
-        extra_features = self._extract_robust_features(code)
-        
-        # 3. Tokenizzazione Intelligente con Random Crop        
+
         all_ids = self.tokenizer.encode(code, add_special_tokens=True, truncation=False)
-        
         total_len = len(all_ids)
         
         if total_len > self.max_length:
             if self.is_train:
+                # Random Crop: [CLS] + chunk casuale
                 start_idx = np.random.randint(1, total_len - self.max_length + 1)
-                # [CLS] + [chunk casuale]
                 input_ids = [all_ids[0]] + all_ids[start_idx : start_idx + self.max_length - 1]
             else:
+                # Truncation standard
                 input_ids = all_ids[:self.max_length]
         else:
-            # Se è corto, prendiamo tutto
             input_ids = all_ids
 
-        # 4. Padding e Maschera di Attenzione
+        # C. Padding
         processed_len = len(input_ids)
         padding_len = self.max_length - processed_len
         
@@ -129,7 +142,6 @@ class CodeDataset(Dataset):
             input_ids = input_ids + [self.pad_token_id] * padding_len
             attention_mask = [1] * processed_len + [0] * padding_len
         else:
-            # Caso limite o esatto
             input_ids = input_ids[:self.max_length]
             attention_mask = [1] * self.max_length
 
@@ -142,25 +154,20 @@ class CodeDataset(Dataset):
 
     def _extract_robust_features(self, code):
         """
-        Calcola metriche resistenti all'offuscamento.
-        Ottimizzato per evitare crash su stringhe vuote.
+        Fallback per calcolo on-the-fly (usato se non ci sono features pre-calcolate o in inferenza).
         """
         features = []
         code_len = len(code) + 1
         
-        # 1. Entropia caratteri
         counts = Counter(code)
         entropy = -sum((cnt / code_len) * math.log2(cnt / code_len) for cnt in counts.values())
         features.append(entropy / 8.0)
         
-        # 2. Densità caratteri speciali
         specials = len(re.findall(r'[{}()\[\];.,+\-*/%&|^!=<>?]', code))
         features.append(specials / code_len)
         
-        # 3. Densità spazi bianchi
         features.append(code.count(' ') / code_len)
         
-        # 4. Lunghezza media parole
         words = re.findall(r'\w+', code)
         num_words = len(words)
         if num_words > 0:
@@ -171,19 +178,10 @@ class CodeDataset(Dataset):
             unique_ratio = 0
             
         features.append(min(avg_word_len / 20.0, 1.0))
-
-        # 5. Densità Keywords
-        keywords = len(re.findall(r'\b(if|for|while|return|def|class|import|void|int|float|string)\b', code))
-        features.append(keywords / (num_words + 1))
-        
-        # 6. Unicità vocabolario
+        features.append(len(re.findall(r'\b(if|for|while|return|def|class|import|void|int)\b', code)) / (num_words + 1))
         features.append(unique_ratio)
+        features.append(min(len(re.findall(r'"[^"]{50,}"|\'[^\']{50,}\'', code)) / 5.0, 1.0))
         
-        # 7. Stringhe lunghe
-        long_strings = len(re.findall(r'"[^"]{50,}"|\'[^\']{50,}\'', code))
-        features.append(min(long_strings / 5.0, 1.0))
-        
-        # 8. Max Nesting Depth (profondità parentesi graffe)
         current_depth = 0
         max_depth = 0
         for char in code:
