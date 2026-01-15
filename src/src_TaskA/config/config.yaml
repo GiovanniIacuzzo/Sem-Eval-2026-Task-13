@@ -1,39 +1,36 @@
 common:
-  # ---------------------------------------------------------------------------
-  # PROJECT META
-  # ---------------------------------------------------------------------------
-  project_name: "semeval2026_Task13"
-  experiment_name: "Subtask-A"
+  seed: 42
+  project_name: "semeval-task13-subtaskA"
   
-  # ---------------------------------------------------------------------------
-  # PATHS
-  # ---------------------------------------------------------------------------
-  data_dir: "data/Task_A"
-  vector_data_dir: "data/Task_A/processed"
-  checkpoint_dir: "results/results_TaskA/checkpoints"
+data:
+  raw_data_dir: "data/Task_A"
+  data_dir: "data/Task_A_Processed"
   
-  # ---------------------------------------------------------------------------
-  # MODEL ARCHITECTURE
-  # ---------------------------------------------------------------------------
-  model_name: "microsoft/unixcoder-base"
+  max_length: 512
+  
+  calc_perplexity: true
+  perplexity_model: "Qwen/Qwen2.5-Coder-1.5B-Instruct" 
+  
+  num_handcrafted_features: 11 
+
+model:
+  base_model: "microsoft/unixcoder-base"
   num_labels: 2
   
-  # Dimensioni Input
-  semantic_embedding_dim: 768
-  structural_feature_dim: 9
-    
-  # ---------------------------------------------------------------------------
-  # TRAINING HYPERPARAMETERS
-  # ---------------------------------------------------------------------------  
-  batch_size: 128
-  num_epochs: 50
-  learning_rate: 1.0e-3
-  early_stop_patience: 10
+  use_lora: false
+  hidden_dropout: 0.2
+  gradient_checkpointing: true
+
+training:
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  num_epochs: 10
   
+  learning_rate: 2.0e-5
   weight_decay: 0.01
   
-  # ---------------------------------------------------------------------------
-  # HARDWARE & REPRODUCIBILITY
-  # ---------------------------------------------------------------------------
-  num_workers: 0 
-  seed: 42
+  focal_gamma: 2.0
+  use_supcon: true
+  
+  checkpoint_dir: "results/result_TaskA/checkpoints"
+  early_stop_patience: 4
