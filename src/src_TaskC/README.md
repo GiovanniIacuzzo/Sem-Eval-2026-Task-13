@@ -199,11 +199,6 @@ The script automatically detects the `test.parquet` file (searching also within 
 
 ---
 
-> [!CAUTION]
-> README ANCORA IN FASE DI SVILUPPO...
-
----
-
 <!--───────────────────────────────────────────────-->
 <!--                   AUTORE                     -->
 <!--───────────────────────────────────────────────-->
