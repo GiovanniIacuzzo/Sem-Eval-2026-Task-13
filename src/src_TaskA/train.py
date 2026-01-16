@@ -1,5 +1,13 @@
 import os
 import sys
+import transformers.utils.import_utils
+import transformers.modeling_utils
+
+transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: True
+transformers.modeling_utils.check_torch_load_is_safe = lambda *args, **kwargs: True
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import yaml
 import torch
 import argparse
@@ -14,9 +22,6 @@ from comet_ml import Experiment
 from sklearn.metrics import confusion_matrix
 from pytorch_metric_learning import losses
 
-import transformers.utils.import_utils
-transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: None
-
 from src.src_TaskA.models.model import HybridClassifier
 from src.src_TaskA.dataset.dataset import load_data
 from src.src_TaskB.utils.utils import set_seed, evaluate_model
@@ -25,7 +30,6 @@ from src.src_TaskB.utils.utils import set_seed, evaluate_model
 # 1. SETUP & UTILS
 # -----------------------------------------------------------------------------
 torch.backends.cudnn.benchmark = True
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,7 +67,7 @@ def save_checkpoint(model, tokenizer, path, epoch, metrics, config):
     logger.info(f"Saving checkpoint to {path}...")
     
     tokenizer.save_pretrained(path)
-    
+
     model_to_save = model.module if hasattr(model, 'module') else model
     torch.save(model_to_save.state_dict(), os.path.join(path, "model_state.bin"))
     
@@ -135,11 +139,11 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, device,
 if __name__ == "__main__":
     load_dotenv()
     
-    parser = argparse.ArgumentParser(description="SemEval Task A - Training")
+    parser = argparse.ArgumentParser(description="SemEval Task A - Generalization Training")
     parser.add_argument("--config", type=str, default="src/src_TaskA/config/config.yaml")
     args = parser.parse_args()
     
-    ConsoleUX.print_banner("SemEval Task 13 - Subtask A")
+    ConsoleUX.print_banner("SemEval Task 13 - Subtask A [Generalization]")
 
     # 1. Configurazione
     if not os.path.exists(args.config):
@@ -163,13 +167,16 @@ if __name__ == "__main__":
     api_key = os.getenv("COMET_API_KEY")
     experiment = None
     if api_key:
-        experiment = Experiment(
-            api_key=api_key,
-            project_name=common_cfg.get("project_name", "semeval-task-a"),
-            auto_metric_logging=False
-        )
-        experiment.log_parameters(config)
-        experiment.add_tag("TaskA_Hybrid")
+        try:
+            experiment = Experiment(
+                api_key=api_key,
+                project_name=common_cfg.get("project_name", "semeval-task-a"),
+                auto_metric_logging=False
+            )
+            experiment.log_parameters(config)
+            experiment.add_tag("TaskA_Hybrid")
+        except Exception as e:
+            logger.warning(f"Comet Init Failed: {e}. Proceeding without it.")
 
     # 3. Data Loading
     tokenizer = AutoTokenizer.from_pretrained(model_cfg["base_model"])
@@ -204,6 +211,7 @@ if __name__ == "__main__":
         weight_decay=train_cfg.get("weight_decay", 0.01)
     )
     
+    # SupCon Loss
     supcon_fn = None
     if train_cfg.get("use_supcon", False):
         logger.info("Activating Supervised Contrastive Loss...")
@@ -226,7 +234,7 @@ if __name__ == "__main__":
     patience_counter = 0
     checkpoint_dir = train_cfg["checkpoint_dir"]
     
-    label_names = ["Human", "AI"]
+    label_names = ["Human", "AI"] 
 
     logger.info(f"Starting Training for {train_cfg['num_epochs']} epochs...")
 
@@ -262,7 +270,6 @@ if __name__ == "__main__":
             
             logger.info(f"--> New Best F1: {best_f1:.4f}. Saving Model...")
             
-            # Salvataggio
             save_checkpoint(
                 model, tokenizer, 
                 os.path.join(checkpoint_dir, "best_model"), 

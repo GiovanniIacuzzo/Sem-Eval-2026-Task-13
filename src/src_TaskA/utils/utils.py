@@ -29,6 +29,7 @@ def evaluate_model(model, dataloader, device, label_names=None):
             feats = batch["extra_features"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
             
+            # Forward (senza passare labels per ottenere logits puri per metrics)
             logits, _, _ = model(input_ids, mask, feats, labels=None)
             
             loss = criterion(logits, labels)
@@ -41,7 +42,11 @@ def evaluate_model(model, dataloader, device, label_names=None):
     # Metriche
     accuracy = accuracy_score(labels_all, preds_all)
     f1 = f1_score(labels_all, preds_all, average='macro')
-    report = classification_report(labels_all, preds_all, target_names=label_names, digits=4)
+    # Gestione etichette mancanti nel report
+    unique_labels = sorted(list(set(labels_all)))
+    target_names = [label_names[i] for i in unique_labels] if label_names else None
+    
+    report = classification_report(labels_all, preds_all, target_names=target_names, digits=4, zero_division=0)
     
     return {
         "loss": total_loss / len(dataloader),

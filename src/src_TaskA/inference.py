@@ -1,220 +1,174 @@
 import os
 import sys
-import torch
 import yaml
-import argparse
+import torch
 import logging
+import argparse
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-from torch.utils.data import DataLoader, TensorDataset
-from transformers import AutoTokenizer, AutoModel
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
+import transformers.utils.import_utils
+import transformers.modeling_utils
+transformers.utils.import_utils.check_torch_load_is_safe = lambda *args, **kwargs: True
+transformers.modeling_utils.check_torch_load_is_safe = lambda *args, **kwargs: True
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-from src.src_TaskA.models.model import HybridCodeClassifier
-from src.src_TaskA.dataset.dataset import StylometricEngine
+from src.src_TaskA.models.model import HybridClassifier
+from src.src_TaskA.dataset.dataset import AgnosticDataset
+from src.src_TaskA.dataset.preprocess_features import AgnosticFeatureExtractor
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
     datefmt="%H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("Inference")
+logger = logging.getLogger(__name__)
 
-class InferencePipeline:
-    def __init__(self, model_path: str, config_path: str, device: str = "cuda"):
-        self.device = device
-        
-        # 1. Carica Configurazione
-        logger.info(f"Loading config from {config_path}...")
-        with open(config_path, "r") as f:
-            full_yaml = yaml.safe_load(f)
-            self.config = full_yaml.get("config", full_yaml.get("common", full_yaml))
+def prepare_test_data(test_path, config, device):
+    """
+    Controlla se il test set ha già le features. Se no, le estrae usando Qwen.
+    """
+    logger.info(f"Checking data: {test_path}")
+    df = pd.read_parquet(test_path)
+    
+    if 'agnostic_features' in df.columns:
+        logger.info("Features already present in dataset.")
+        return df
+    
+    logger.info("Features missing. Initializing Feature Extractor (this takes time)...")
+    
+    cache_path = test_path.replace(".parquet", "_processed.parquet")
+    if os.path.exists(cache_path):
+        logger.info(f"Found cached processed file: {cache_path}")
+        return pd.read_parquet(cache_path)
 
-        self.config["semantic_embedding_dim"] = self.config.get("semantic_embedding_dim", 768)
-        self.config["structural_feature_dim"] = self.config.get("structural_feature_dim", 10)
-
-        # 2. Inizializza Modello
-        logger.info("Initializing Model...")
-        self.model = HybridCodeClassifier(self.config)
-        
-        # 3. Carica Pesi
-        logger.info(f"Loading weights from {model_path}...")
-        state_dict = torch.load(model_path, map_location=device)
-        self.model.load_state_dict(state_dict)
-        self.model.to(device)
-        self.model.eval()
-
-        # 4. Componenti per Vettorizzazione (Lazy Loading)
-        self.tokenizer = None
-        self.encoder = None
-        self.style_engine = StylometricEngine()
-        
-        # Statistiche di normalizzazione (Mean/Std)
-        self.train_stats = None
-
-    def _load_encoder(self):
-        """Carica UniXcoder solo se necessario per vettorizzare raw text."""
-        if self.encoder is None:
-            model_name = self.config.get("model_name", "microsoft/unixcoder-base")
-            logger.info(f"Loading Backbone {model_name} for inference...")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self.encoder = AutoModel.from_pretrained(model_name).to(self.device)
-            self.encoder.eval()
-
-    def load_normalization_stats(self, train_vectors_path: str):
-        """
-        Carica le statistiche (mean, std) dai vettori di training.
-        Fondamentale per la coerenza matematica.
-        """
-        if os.path.exists(train_vectors_path):
-            logger.info(f"Loading normalization stats from {train_vectors_path}...")
-            train_data = torch.load(train_vectors_path, map_location="cpu")
-            features = train_data["features"].float()
+    extractor = AgnosticFeatureExtractor(config, str(device))
+    
+    features_list = []
+    logger.info(f"Extracting features for {len(df)} test samples...")
+    
+    for code in tqdm(df['code'], desc="Feature Extraction"):
+        try:
+            feats = extractor.extract_all(code)
+            features_list.append(feats)
+        except Exception:
+            features_list.append([0.0] * 11)
             
-            self.train_stats = {
-                "mean": features.mean(dim=0).to(self.device),
-                "std": (features.std(dim=0) + 1e-6).to(self.device)
-            }
-        else:
-            logger.warning(f"Train vectors not found at {train_vectors_path}. Using Test stats (Less Accurate).")
-            self.train_stats = None
-
-    def vectorize_on_the_fly(self, df: pd.DataFrame, batch_size: int = 32):
-        """Trasforma il dataframe raw in tensori pronti per il modello."""
-        self._load_encoder()
-        
-        codes = df['code'].astype(str).tolist()
-        
-        # Gestione Perplexity
-        if 'perplexity' not in df.columns:
-            logger.warning("'perplexity' column missing in test set! Filling with 0.0.")
-            ppls = [0.0] * len(codes)
-        else:
-            ppls = df['perplexity'].astype(float).tolist()
-
-        # A. Feature Stilometriche
-        logger.info("Extracting Structural Features...")
-        struct_list = []
-        for code, ppl in tqdm(zip(codes, ppls), total=len(codes), desc="Style"):
-            struct_list.append(self.style_engine.process(code, ppl))
-        
-        struct_tensor = torch.tensor(struct_list, dtype=torch.float32).to(self.device)
-
-        # B. Normalizzazione
-        if self.train_stats:
-            struct_tensor = (struct_tensor - self.train_stats["mean"]) / self.train_stats["std"]
-        else:
-            # Fallback: Normalizza sul test set stesso
-            mean = struct_tensor.mean(dim=0)
-            std = struct_tensor.std(dim=0) + 1e-6
-            struct_tensor = (struct_tensor - mean) / std
-
-        # C. Embeddings Semantici
-        logger.info("Extracting Semantic Embeddings...")
-        emb_list = []
-        for i in tqdm(range(0, len(codes), batch_size), desc="UniXcoder"):
-            batch = codes[i : i+batch_size]
-            inputs = self.tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
-            with torch.no_grad():
-                out = self.encoder(**inputs)
-                emb = out.last_hidden_state.mean(dim=1)
-            emb_list.append(emb)
-        
-        emb_tensor = torch.cat(emb_list, dim=0)
-        
-        return emb_tensor, struct_tensor
-
-    def predict(self, df: pd.DataFrame):
-        emb, struct = self.vectorize_on_the_fly(df)
-        labels = torch.tensor(df['label'].values, dtype=torch.long).to(self.device)
-        
-        dataset = TensorDataset(emb, struct, labels)
-        loader = DataLoader(dataset, batch_size=64, shuffle=False)
-        
-        all_preds = []
-        all_probs = []
-        all_labels = []
-        
-        logger.info("Running Inference...")
-        with torch.no_grad():
-            for b_emb, b_struct, b_lbl in tqdm(loader, desc="Predicting"):
-                outputs = self.model(
-                    semantic_embedding=b_emb,
-                    structural_features=b_struct
-                )
-                logits = outputs["logits"]
-                probs = torch.softmax(logits, dim=1)
-                preds = torch.argmax(logits, dim=1)
-                
-                all_preds.extend(preds.cpu().numpy())
-                all_probs.extend(probs[:, 1].cpu().numpy()) # Probabilità classe AI
-                all_labels.extend(b_lbl.cpu().numpy())
-                
-        return np.array(all_preds), np.array(all_labels), np.array(all_probs)
-
-def main():
-    parser = argparse.ArgumentParser(description="Inference Script for SemEval Task A")
-    parser.add_argument("--test_file", type=str, required=True, help="Path to test parquet (e.g., test_sample_ppl_burst.parquet)")
-    parser.add_argument("--model_path", type=str, required=True, help="Path to best_model/model_state.bin")
-    parser.add_argument("--config_path", type=str, required=True, help="Path to training_meta.yaml or config.yaml")
-    parser.add_argument("--train_vectors", type=str, default="data/Task_A/processed/train_vectors.pt", 
-                        help="Path to training vectors to retrieve normalization stats")
-    parser.add_argument("--output_csv", type=str, default="inference_results.csv", help="Where to save predictions")
+    df['agnostic_features'] = features_list
     
-    args = parser.parse_args()
+    logger.info(f"Saving processed test data to {cache_path}")
+    df.to_parquet(cache_path)
+    
+    del extractor
+    torch.cuda.empty_cache()
+    
+    return df
 
-    # Checks
-    if not os.path.exists(args.test_file):
-        logger.error(f"Test file not found: {args.test_file}")
+def run_inference(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Inference Device: {device}")
+
+    # 1. Carica Configurazione
+    config_path = os.path.join(args.checkpoint_dir, "config.yaml")
+    if not os.path.exists(config_path):
+        logger.error(f"Config not found in {args.checkpoint_dir}")
         sys.exit(1)
+        
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # 2. Prepara i Dati
+    test_df = prepare_test_data(args.test_file, config, device)
     
-    # Init Pipeline
-    pipeline = InferencePipeline(args.model_path, args.config_path, device)
+    if 'label' in test_df.columns:
+        test_df = test_df.dropna(subset=['label']).reset_index(drop=True)
+        has_labels = True
+    else:
+        has_labels = False
+        test_df['label'] = 0 
+
+    # 3. Carica Modello e Tokenizer
+    logger.info("Loading Model & Tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint_dir)
     
-    # Tenta di caricare statistiche di training
-    pipeline.load_normalization_stats(args.train_vectors)
+    model = HybridClassifier(config)
     
-    # Load Data
-    logger.info(f"Loading Test Data: {args.test_file}")
-    df = pd.read_parquet(args.test_file)
-    logger.info(f"Test Samples: {len(df)}")
+    weights_path = os.path.join(args.checkpoint_dir, "model_state.bin")
+    state_dict = torch.load(weights_path, map_location="cpu")
+    model.load_state_dict(state_dict)
     
-    # Esegui Predizione
-    preds, labels, probs = pipeline.predict(df)
-    
-    # Calcolo Metriche
-    acc = accuracy_score(labels, preds)
-    logger.info(f"\nTest Accuracy: {acc:.4f}")
-    
-    print("\n" + classification_report(labels, preds, target_names=["Human", "AI"], digits=4))
-    
-    # Matrice di Confusione
-    cm = confusion_matrix(labels, preds)
-    print(f"Confusion Matrix:\n{cm}")
-    
-    # Salvataggio Risultati
-    df['predicted_label'] = preds
-    df['ai_probability'] = probs
-    
-    # Aggiungi colonna corretto/errato per analisi errori
-    df['is_correct'] = (df['label'] == df['predicted_label'])
-    
-    logger.info(f"Saving results to {args.output_csv}...")
-    df.to_csv(args.output_csv, index=False)
-    
-    # Analisi Errori Rapida
-    errors = df[~df['is_correct']]
-    if not errors.empty:
-        logger.info(f"Total Errors: {len(errors)}")
-        logger.info("Top 3 Error Snippets (High Confidence Wrong):")
-        errors['confidence_error'] = np.abs(errors['ai_probability'] - (1 - errors['predicted_label'])) # Distanza da incertezza
-        print(errors[['code', 'language', 'label', 'predicted_label', 'ai_probability']].head(3))
+    model.to(device)
+    model.eval()
+
+    # 4. DataLoader
+    dataset = AgnosticDataset(test_df, tokenizer, max_length=config["data"]["max_length"], is_train=False)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+
+    # 5. Prediction Loop
+    logger.info("Running Prediction...")
+    all_preds = []
+    all_probs = []
+    all_labels = []
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Inferencing"):
+            input_ids = batch["input_ids"].to(device)
+            mask = batch["attention_mask"].to(device)
+            feats = batch["extra_features"].to(device)
+            
+            # Forward
+            logits, _, _ = model(input_ids, mask, feats, labels=None)
+            probs = torch.softmax(logits, dim=1)
+            preds = torch.argmax(logits, dim=1)
+            
+            all_preds.extend(preds.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+            if has_labels:
+                all_labels.extend(batch["labels"].numpy())
+
+    # 6. Report Risultati
+    if has_labels:
+        print("\n" + "="*60)
+        print("TEST SET EVALUATION REPORT".center(60))
+        print("="*60)
+        
+        acc = accuracy_score(all_labels, all_preds)
+        print(f"\nAccuracy: {acc:.4f}")
+        
+        print("\nClassification Report:")
+        print(classification_report(all_labels, all_preds, target_names=["Human", "AI"], digits=4))
+        
+        print("\nConfusion Matrix:")
+        print(confusion_matrix(all_labels, all_preds))
+        
+        test_df['pred'] = all_preds
+        errors = test_df[test_df['label'] != test_df['pred']]
+        if not errors.empty:
+            error_path = args.test_file.replace(".parquet", "_errors.csv")
+            cols = ['code', 'label', 'pred']
+            if 'language' in errors.columns: cols.append('language')
+            errors[cols].head(100).to_csv(error_path, index=False)
+            logger.info(f"Saved first {len(errors)} errors to {error_path}")
+
+    else:
+        print("\nInference Complete. Saving predictions...")
+        test_df['prediction'] = all_preds
+        test_df['probability_ai'] = [p[1] for p in all_probs]
+        
+        out_path = args.test_file.replace(".parquet", "_predictions.csv")
+        test_df[['code', 'prediction', 'probability_ai']].to_csv(out_path, index=False)
+        logger.info(f"Predictions saved to {out_path}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test_file", type=str, required=True, help="Path to test .parquet file")
+    parser.add_argument("--checkpoint_dir", type=str, required=True, help="Path to the saved model folder")
+    parser.add_argument("--batch_size", type=int, default=32)
+    args = parser.parse_args()
+    
+    run_inference(args)

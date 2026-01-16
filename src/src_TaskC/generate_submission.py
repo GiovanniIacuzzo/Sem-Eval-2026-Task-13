@@ -5,14 +5,13 @@ import torch
 import argparse
 import logging
 import pandas as pd
-import numpy as np
-import re
 from tqdm import tqdm
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from src.src_TaskC.models.model import CodeClassifier
 from src.src_TaskC.utils.utils import set_seed
+from src.src_TaskC.dataset.Inference_dataset import inference_collate,InferenceDataset
 
 # -----------------------------------------------------------------------------
 # 1. SETUP & LOGGING
@@ -26,159 +25,66 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# 2. DATASET
+# 3. MODEL LOADER (FIXED KeyError 'model')
 # -----------------------------------------------------------------------------
-class SubmissionDataset(Dataset):
-    def __init__(self, df, tokenizer, max_length=512):
-        self.df = df
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        
-        if "text" in df.columns: self.text_col = "text"
-        elif "content" in df.columns: self.text_col = "content"
-        elif "code" in df.columns: self.text_col = "code"
-        else:
-            self.text_col = df.select_dtypes(include=['object']).columns[0]
-            logger.warning(f"Text column not found. Using '{self.text_col}'")
-
-        if "id" in df.columns: self.id_col = "id"
-        elif "ID" in df.columns: self.id_col = "ID"
-        elif "index" in df.columns: self.id_col = "index"
-        else:
-            self.id_col = None
-            logger.warning("ID column not found. Will use row index.")
-            
-    def _extract_stylistic_features(self, code):
-        """
-        Logica esatta del training Task C.
-        """
-        features = []
-        lines = code.split('\n')
-        non_empty_lines = [l for l in lines if l.strip()]
-        code_len = len(code) + 1
-        
-        # 1. Spazi
-        features.append(code.count(' ') / code_len)
-        # 2. Commenti
-        features.append((code.count('#') + code.count('//')) / code_len)
-        # 3. Punteggiatura
-        features.append(len(re.findall(r'[{}()\[\];.,]', code)) / code_len)
-        # 4. Lunghezza media riga
-        avg_line_len = np.mean([len(l) for l in non_empty_lines]) if non_empty_lines else 0
-        features.append(min(avg_line_len / 100.0, 1.0))
-        # 5. Righe vuote
-        features.append((len(lines) - len(non_empty_lines)) / (len(lines) + 1))
-        # 6. Snake vs Camel
-        snake_count = code.count('_')
-        camel_count = len(re.findall(r'[a-z][A-Z]', code))
-        features.append(snake_count / (snake_count + camel_count + 1))
-        # 7. Keywords logiche
-        logic_tokens = len(re.findall(r'\b(if|for|while|return|switch|case|break)\b', code))
-        features.append(logic_tokens / (len(code.split()) + 1))
-        # 8. Indentazione
-        max_indent = 0
-        if non_empty_lines:
-            max_indent = max([len(l) - len(l.lstrip()) for l in non_empty_lines])
-        features.append(min(max_indent / 20.0, 1.0))
-        
-        return torch.tensor(features, dtype=torch.float)
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        code = str(row[self.text_col])
-        
-        if self.id_col:
-            sample_id = str(row[self.id_col])
-        else:
-            sample_id = str(idx)
-        
-        style_feats = self._extract_stylistic_features(code)
-        
-        tokens = self.tokenizer.tokenize(code)
-        capacity = self.max_length - 2 
-        
-        if len(tokens) <= capacity:
-            chunk_str = code
-        else:
-            half = capacity // 2
-            kept_tokens = tokens[:half] + tokens[-half:]
-            chunk_str = self.tokenizer.convert_tokens_to_string(kept_tokens)
-
-        encoding = self.tokenizer(
-            chunk_str,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-            return_tensors="pt"
-        )
-        
-        return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "extra_features": style_feats,
-            "id": sample_id
-        }
-
-def submission_collate(batch):
-    input_ids = torch.stack([item['input_ids'] for item in batch])
-    attention_mask = torch.stack([item['attention_mask'] for item in batch])
-    extra_features = torch.stack([item['extra_features'] for item in batch])
-    ids = [item['id'] for item in batch]
-    
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "extra_features": extra_features,
-        "ids": ids
-    }
-
-# -----------------------------------------------------------------------------
-# 3. MODEL LOADER
-# -----------------------------------------------------------------------------
-def load_model(checkpoint_path, config, device):
-    model_config = {
+def load_model_instance(checkpoint_path, flat_config, num_labels, device):
+    """
+    Carica il modello costruendo la configurazione annidata corretta.
+    """
+    model_cfg = {
         "model": {
-            "model_name": config["model"]["model_name"],
-            "num_labels": 4,
-            "num_extra_features": 8,
+            "model_name": flat_config.get("model_name", "microsoft/unixcoder-base"),
+            "num_labels": num_labels,
+            "num_extra_features": flat_config.get("num_extra_features", 8),
+            "gradient_checkpointing": False
         },
-        "training": config.get("training", {}),
+        "training": flat_config,
+        "data": flat_config
     }
     
-    model = CodeClassifier(model_config)
+    logger.info(f"Loading Model from: {checkpoint_path} (Labels: {num_labels})")
     
-    logger.info(f"Loading weights from: {checkpoint_path}")
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    model = CodeClassifier(model_cfg)
     
     if os.path.isdir(checkpoint_path):
         weights_path = os.path.join(checkpoint_path, "best_model.bin")
         if not os.path.exists(weights_path):
-            weights_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+             weights_path = os.path.join(checkpoint_path, "pytorch_model.bin")
     else:
         weights_path = checkpoint_path
         
-    state_dict = torch.load(weights_path, map_location=device)
-    
-    new_state_dict = {k.replace("module.", "").replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-    
-    model.load_state_dict(new_state_dict, strict=False)
+    if not os.path.exists(weights_path):
+        raise FileNotFoundError(f"Checkpoint not found: {weights_path}")
+
+    try:
+        state_dict = torch.load(weights_path, map_location=device, weights_only=False)
+    except TypeError:
+        state_dict = torch.load(weights_path, map_location=device)
+
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        key = k.replace("module.", "") 
+        if "loss_fn" in key: continue
+        new_state_dict[key] = v
+        
+    try:
+        model.load_state_dict(new_state_dict, strict=True)
+    except RuntimeError as e:
+        logger.warning(f"Strict loading failed ({e}), retrying non-strict...")
+        model.load_state_dict(new_state_dict, strict=False)
+
     model.to(device)
     model.eval()
-    
     return model
 
 # -----------------------------------------------------------------------------
-# 4. PREDICTION LOGIC
+# 4. CASCADE PREDICTION
 # -----------------------------------------------------------------------------
-def predict(model, dataloader, device):
+def predict_cascade(binary_model, attrib_model, dataloader, device):
     all_ids = []
-    all_preds = []
+    all_labels = []
     
-    logger.info("Generating predictions...")
+    logger.info("Generating predictions (Human vs Machine -> AI/Hybrid/Adv)...")
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Submission"):
@@ -187,79 +93,101 @@ def predict(model, dataloader, device):
             extra_features = batch["extra_features"].to(device)
             ids = batch["ids"]
             
-            # Forward singolo
-            logits, _, _ = model(
-                input_ids, 
-                attention_mask, 
-                extra_features=extra_features
-            )
+            batch_size = input_ids.size(0)
             
-            preds = torch.argmax(logits, dim=1)
+            # --- STAGE 1: Binary ---
+            out_bin = binary_model(input_ids, attention_mask, extra_features=extra_features)
+            preds_bin = torch.argmax(out_bin[0], dim=1)
+            
+            machine_indices = (preds_bin == 1).nonzero(as_tuple=True)[0]            
+            batch_final_labels = [0] * batch_size 
+            
+            # --- STAGE 2: Attribution ---
+            if len(machine_indices) > 0:
+                mach_input_ids = input_ids[machine_indices]
+                mach_att_mask = attention_mask[machine_indices]
+                mach_extra = extra_features[machine_indices]
+                
+                out_attr = attrib_model(mach_input_ids, mach_att_mask, extra_features=mach_extra)
+                preds_attr = torch.argmax(out_attr[0], dim=1)
+                
+                mapping = {0: 1, 1: 2, 2: 3}
+                
+                for i, idx_in_batch in enumerate(machine_indices):
+                    local_label = preds_attr[i].item()
+                    global_label = mapping.get(local_label, 1)
+                    batch_final_labels[idx_in_batch.item()] = global_label
             
             all_ids.extend(ids)
-            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(batch_final_labels)
             
-    return all_ids, all_preds
+    return all_ids, all_labels
 
 # -----------------------------------------------------------------------------
 # 5. MAIN
 # -----------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test_file", type=str, required=True, help="Path to parquet test file")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to best_model.bin")
+    parser.add_argument("--test_file", type=str, required=True, help="Input parquet file")
+    parser.add_argument("--ckpt_binary", type=str, required=True, help="Path to Stage 1 model")
+    parser.add_argument("--ckpt_attrib", type=str, required=True, help="Path to Stage 2 model")
     parser.add_argument("--config", type=str, default="src/src_TaskC/config/config.yaml")
     parser.add_argument("--output_file", type=str, default="submission_taskC.csv")
+    parser.add_argument("--batch_size", type=int, default=32)
     args = parser.parse_args()
 
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Device: {device}")
     
-    if not os.path.exists(args.config):
-        logger.error(f"Config not found at {args.config}")
-        sys.exit(1)
-
+    # 1. Config
     with open(args.config, "r") as f:
-        config = yaml.safe_load(f)
-
-    logger.info("Initializing Model...")
-    model_name = config["model"]["model_name"]
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = load_model(args.checkpoint, config, device)
-
-    logger.info(f"Loading Test Data: {args.test_file}")
-    df_test = pd.read_parquet(args.test_file)
-    logger.info(f"Test samples: {len(df_test)}")
+        raw_config = yaml.safe_load(f)
+    config = raw_config["common"].copy()
     
-    dataset = SubmissionDataset(df_test, tokenizer, max_length=config["data"]["max_length"])
+    config["model_name"] = raw_config.get("model", {}).get("model_name", "microsoft/unixcoder-base")
+    config["max_length"] = raw_config.get("data", {}).get("max_length", 512)
+    config["num_extra_features"] = raw_config.get("model", {}).get("num_extra_features", 8)
+    
+    tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
+
+    # 2. Models
+    # Stage 1: 2 Labels (Human vs Machine)
+    model_binary = load_model_instance(args.ckpt_binary, config, 2, device)
+    
+    # Stage 2: 3 Labels (AI vs Hybrid vs Adv)
+    model_attrib = load_model_instance(args.ckpt_attrib, config, 3, device)
+
+    # 3. Data
+    logger.info(f"Loading Submission Data: {args.test_file}")
+    df_test = pd.read_parquet(args.test_file)
+    
+    dataset = InferenceDataset(df_test, tokenizer, max_length=config["max_length"])
     dataloader = DataLoader(
         dataset, 
-        batch_size=config["training"]["batch_size"], 
+        batch_size=args.batch_size, 
         shuffle=False, 
         num_workers=4, 
-        collate_fn=submission_collate
+        collate_fn=inference_collate
     )
 
-    ids, labels = predict(model, dataloader, device)
+    # 4. Predict
+    ids, labels = predict_cascade(model_binary, model_attrib, dataloader, device)
 
+    # 5. Save
+    logger.info(f"Saving submission to {args.output_file}...")
+    
     submission_df = pd.DataFrame({
         "ID": ids,
         "label": labels
     })
     
-    os.makedirs(os.path.dirname(args.output_file) if os.path.dirname(args.output_file) else '.', exist_ok=True)
+    os.makedirs(os.path.dirname(args.output_file) or ".", exist_ok=True)
     submission_df.to_csv(args.output_file, index=False)
     
-    logger.info(f"Submission saved to {args.output_file}")
-    
-    print("\n--- PREVIEW ---")
+    logger.info("Submission Generated Successfully.")
+    print("\nPreview:")
     print(submission_df.head().to_string(index=False))
-    
-    counts = submission_df['label'].value_counts().sort_index()
-    print("\n--- CLASS DISTRIBUTION ---")
-    mapping = {0: "Human", 1: "Machine", 2: "Hybrid", 3: "Adversarial"}
-    for label, count in counts.items():
-        print(f"Class {label} ({mapping.get(label, '?')}): {count}")
 
 if __name__ == "__main__":
     main()
