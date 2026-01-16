@@ -118,6 +118,13 @@ Il cuore del sistema è una classe custom `CodeClassifier` che estende **UniXcod
 
 ## 🚀 Istruzioni per l'Esecuzione
 
+### 0. Inizio
+
+Prima di avviare il train lanciare il codice per preparare le features:
+```bash
+python -m src.src_TaskB.dataset.prepare_split_data
+```
+
 ### 1. Addestramento
 
 Per avviare la training pipeline con logging su console, TensorBoard e CometML:

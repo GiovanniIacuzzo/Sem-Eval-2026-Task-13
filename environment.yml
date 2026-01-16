@@ -20,6 +20,7 @@ dependencies:
   - pip:
       - transformers>=4.48.0
       - accelerate>=1.0.0
+      - pytorch_metric_learning
       - tokenizers
       - sentencepiece
       - datasets

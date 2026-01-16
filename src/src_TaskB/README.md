@@ -78,6 +78,12 @@ This information helps to understand:
 
 ## 🚀 Execution Instructions
 
+### 0. Initialization
+Before starting the training, run the code to prepare the features:
+```bash
+python -m src.src_TaskB.dataset.prepare_split_data
+```
+
 ### 1. Training
 
 To start the training pipeline with logging to console, TensorBoard, and CometML:
