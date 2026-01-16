@@ -66,10 +66,71 @@ Queste informazioni aiutano a capire:
 
 ---
 
+## ⚙️ Metodologia e Architettura
+Per il task di identificazione binaria (`Human vs AI`), l'obiettivo principale è stato massimizzare la capacità di generalizzazione del modello, evitando l'overfitting su specifici pattern lessicali. È stata sviluppata un'architettura Ibrida `Semantico-Stilometrica` che combina la comprensione profonda del codice di un Transformer con feature stilistiche esplicite.
+
+### 1. Hybrid Fusion Architecture
+
+Il modello non si affida esclusivamente all'embedding del codice generato da un LLM, ma integra un vettore di feature "`agnostiche`" che catturano la "`firma`" statistica del generatore.
+
+```mermaid
+graph LR;
+    A[Input Code Snippet] --> B[UniXcoder Backbone];
+    A --> C[Agnostic Feature Extractor];
+    B -- Semantic Embed --> D[Attention Pooling];
+    C -- 11 Manual Feats --> E[Feature Gating Net];
+    D --> F((Concatenation));
+    E --> F;
+    F --> G[Binary Classifier];
+    G --> H[Human / AI];
+```
+
+### 2. Componenti del Modello
+
+L'architettura, definita nella classe `HybridClassifier`, si compone di tre moduli distinti:
+
+- **Semantic Branch (UniXcoder + Attention)**: Utilizza `microsoft/unixcoder-base` come backbone. Al posto del classico pooling sul token `[CLS]`, è stato implementato un **Attention Pooling** custom. Questo meccanismo apprende dinamicamente quali token sono più rilevanti per la classificazione, generando una somma pesata degli hidden states che cattura meglio le sfumature semantiche rispetto al pooling statico.
+
+- **Stylometric Branch (Feature Gating)**: Un modulo parallelo (`FeatureGatingNetwork`) basato su un MLP con attivazioni **Mish** e **BatchNorm**, progettato per proiettare le 11 feature manuali (vedi punto 3) in uno spazio latente a 128 dimensioni, rendendole compatibili per la fusione con l'embedding semantico.
+
+- **Late Fusion**: I due vettori (Semantico e Stilometrico) vengono concatenati e passati a una classification head finale. Questo permette al modello di "correggere" le allucinazioni semantiche usando segnali statistici forti (es. perplessità o entropia).
+
+### 3. Feature Engineering Avanzato
+
+L'estrattore (`AgnosticFeatureExtractor`) calcola un vettore di 11 feature per ogni snippet, divise in tre categorie:
+
+- **Metrica Neurale (Perplexity)**: Viene utilizzata una versione quantizzata di **Qwen2.5-Coder-1.5B** per calcolare la perplessità del codice. Il razionale è che il codice generato da AI tende ad avere una perplessità statistica inferiore (più "prevedibile" per un altro LLM) rispetto al codice umano creativo o "sporco".
+
+- **Analisi degli Identificatori**: Calcolo dell'entropia dei nomi di variabili, ratio di identificatori corti (es. `i`, `x`) e presenza di numeri nei nomi (es. `var1`), che spesso distinguono lo stile umano legacy.
+
+- **Struttura e Coerenza**:
+
+  - Consistency Score: Misura se lo snippet mischia SnakeCase e CamelCase (tipico umano) o è perfettamente coerente (tipico AI).
+
+  - Spacing Ratio: Analizza la spaziatura attorno agli operatori (es. `a=b` vs `a = b`).
+
+  - Human Markers: Regex per individuare commenti tipici come `TODO`, `FIXME`, `HACK`.
+
+### 4. Strategie di Training
+
+- **Loss Ibrida (Task + SupCon)**: La loss finale è una somma pesata: `Loss = Task_Loss + 0.1 * SupCon_Loss`. L'uso della **Supervised Contrastive Loss** aiuta a clusterizzare nello spazio vettoriale gli esempi umani rispetto a quelli AI prima ancora del layer di classificazione, migliorando la robustezza del decision boundary.
+
+- **Data Augmentation (Random Cropping)**: Per gestire snippet lunghi senza perdere informazioni, in fase di training viene effettuato un random crop dello snippet alla lunghezza massima (512 token) invece di un troncamento statico. Questo espone il modello a parti diverse del codice (intestazioni, logica centrale, chiusure) aumentando la varianza dei dati.
+
+- **Feature Normalization**: Le feature numeriche (come la perplessità o la lunghezza media) vengono normalizzate tramite trasformazione logaritmica (`log1p`) e clipping, per evitare che valori outlier destabilizzino i gradienti della rete neurale.
+
+---
+
 ## 🚀 Istruzioni per l'Esecuzione
 
+### 0. Inizio
+Prima di avviare il train lanciare il codice per preparare le featurs:
+```bash
+python -m src.src_TaskA.dataset.prepare_features
+```
+
 ### 1. Addestramento
-Per avviare la training pipeline con logging su console, TensorBoard e CometML:
+Dopo aver lanciato `prepare_features`, per avviare la training pipeline con logging su console, TensorBoard e CometML:
 ```bash
 python -m src.src_TaskA.train
 ```
@@ -96,6 +157,7 @@ Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle 
 │       │
 │       ├── 📁 dataset
 │       │   ├── 🐍 Inference_dataset.py
+│       │   ├── 🐍 preprocess_features.py
 │       │   └── 🐍 dataset.py
 │       │
 │       ├── 📁 features
@@ -118,14 +180,6 @@ Lo script rileva automaticamente il file `test.parquet` (cercandolo anche nelle 
 │       │
 │       └── 🐍 train.py
 ```
-
----
-
-## 🧠 Architettura del Modello e Strategia
-
-> [!CAUTION]
-> README ANCORA IN FASE DI SVILUPPO...
-
 
 --- 
 
