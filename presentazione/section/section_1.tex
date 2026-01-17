@@ -15,7 +15,7 @@
         \small
         La generazione di codice tramite LLM (GPT-4, StarCoder) è pervasiva. Tuttavia, i detector attuali sono fragili: funzionano bene su ciò che conoscono (Python, Java), ma crollano appena cambia il contesto.
     \end{tcolorbox}
-    
+    \pause
     \vspace{0.2cm}
     
     \textbf{Le sfide aperte:}
@@ -28,12 +28,12 @@
         \\ 
         \footnotesize
         La maggior parte dei dataset contiene codice "Algoritmico" (LeetCode). Nel mondo reale, il codice è vario (Web, Embedded) e scritto in linguaggi rari (Go, PHP, C\#).
-        
+        \pause
         \item[\color{CyanGlow}\faUserSecret] \textbf{Attribuzione e Copyright:}
         \\
         \footnotesize
         Non basta sapere \textit{se} è stato generato da un'AI. Per questioni legali, dobbiamo sapere \textit{quale} modello lo ha creato (OpenAI vs Open Source).
-        
+        \pause
         \item[\color{CyanGlow}\faRandom] \textbf{Scenari Ibridi e Avversari:}
         \\
         \footnotesize
@@ -68,6 +68,7 @@
             \footnotesize
             Classificazione binaria: il codice è stato scritto da un umano o generato da un LLM? La difficoltà non sta nella classificazione in sé, ma nella \textbf{Robustezza}.
             \vspace{0.3cm}
+            \pause
             
             \textbf{\small \faExpand \ Le Dimensioni della Generalizzazione:}
             \vspace{0.1cm}
@@ -134,14 +135,15 @@
             \vspace{0.1cm}
             \footnotesize
             Non basta distinguere Umano vs Macchina. Il sistema deve riconoscere l'\textbf{impronta stilistica unica} di ogni famiglia di modelli (es. come \textit{Llama} gestisce i cicli vs come li fa \textit{DeepSeek}).
-            
+            \pause
             \vspace{0.3cm}
             
             \textbf{\small \faBalanceScale \ Extreme Class Imbalance}
             \par\vspace{0.1cm}
             \scriptsize
             Il dataset è fortemente sbilanciato verso il codice umano, rendendo difficile per il modello apprendere le sfumature delle classi minoritarie (AI).
-            \vspace{0.1cm}
+            \pause
+            \vspace{0.2cm}
             
             \begin{tikzpicture}
                 \node[anchor=west, font=\tiny\bfseries] at (0, 0.4) {HUMAN (442k)};
@@ -245,7 +247,7 @@
             \vspace{0.1cm}
             \small
             Oltre alla distinzione binaria, introduciamo le \textbf{Zone Grigie} dello sviluppo software moderno.
-            
+            \pause
             \vspace{0.2cm}
             
             \textbf{\small \faHandshake \ Class 2: HYBRID (Mixed)}
@@ -253,7 +255,7 @@
             \scriptsize
             \textit{"Augmented Intelligence".} Codice nato dalla collaborazione: l'umano scrive la logica core, l'AI (Copilot) completa il boilerplate (o viceversa).
             \\ \color{gray} $\to$ Sfida: Rilevare i punti di transizione nello stesso file.
-            
+            \pause
             \vspace{0.3cm}
             
             \textbf{\small \faUserSecret \ Class 3: ADVERSARIAL}

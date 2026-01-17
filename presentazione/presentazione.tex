@@ -1,108 +1,159 @@
 \documentclass[10pt, aspectratio=169]{beamer}
 
-\DeclareFontShape{T1}{cmss}{b}{n}{<->ssub*cmss/bx/n}{}
-
-% --- Pacchetti ---
+% --- PACCHETTI ---
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage[italian]{babel}
 \usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage{tikz}
-\usetikzlibrary{calc, backgrounds, shadings, shadows.blur, positioning, fadings, patterns, shapes.geometric}
+\usetikzlibrary{calc, backgrounds, shadings, shadows.blur, positioning, patterns, shapes.geometric, arrows.meta, fadings}
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{fontawesome5} 
 \usepackage{caption}
-\usepackage[most]{tcolorbox}
+\usepackage[most]{tcolorbox} 
 \usepackage{microtype} 
 \usepackage{hyperref} 
+\usepackage{etoolbox} 
 
-% --- 1. DEFINIZIONE COLORI ---
-\definecolor{Obsidian}{HTML}{08080A}      % Sfondo scuro
-\definecolor{Charcoal}{HTML}{121214}      % Grigio scuro
-\definecolor{PaperWhite}{HTML}{FFFFFF}    % Bianco
-\definecolor{DarkText}{HTML}{1A1A1A}      % Testo scuro
+% =========================================================
+% 1. PALETTE
+% =========================================================
+\definecolor{Obsidian}{HTML}{2D3436}       % Grigio Scuro (Testo su slide bianche)
+\definecolor{DeepBlack}{HTML}{08080A}      % Nero Profondo (Solo per Copertina/Transizioni)
+\definecolor{PaperWhite}{HTML}{FFFFFF}     % Bianco (Sfondo slide)
+\definecolor{LightGray}{HTML}{F9FAFB}      % Sfondo Codice
+\definecolor{VividViolet}{HTML}{7F00FF}    % Viola Neon
+\definecolor{CyanGlow}{HTML}{00F0FF}       % Ciano Neon
+\definecolor{TechViolet}{HTML}{6C5CE7}     % Viola più leggibile su bianco
 
-% Accenti "Deep Tech"
-\definecolor{VividViolet}{HTML}{7F00FF}   % Viola Puro
-\definecolor{ElectricPurple}{HTML}{8A2BE2} 
-\definecolor{CyanGlow}{HTML}{00F0FF}      % Ciano Cyber
-\definecolor{NeonPurple}{HTML}{9B30FF}    
-\definecolor{DeepViolet}{HTML}{450580}
-\definecolor{ElectricBlue}{HTML}{007BFF}
+\colorlet{CyanAcc}{CyanGlow}
+\colorlet{DeepSlate}{Obsidian}
+\colorlet{Charcoal}{DeepBlack}     
+\definecolor{NeonPink}{HTML}{FF007F}     
+\definecolor{ElectricPurple}{HTML}{6C5CE7}
 
-% --- 2. OTTIMIZZAZIONE FULL SCREEN ---
-\hypersetup{
-    pdfpagemode=FullScreen,
-    pdftitle={SemEval-2026 Task 13},
-    pdfauthor={Giovanni Giuseppe Iacuzzo},
-    colorlinks=true,
-    linkcolor=white,
-    urlcolor=CyanGlow 
-}
-
-% --- 3. FONT ---
+% =========================================================
+% 2. SETUP BEAMER
+% =========================================================
 \usepackage[default]{lato} 
 
-% --- 4. MARGINI ---
-\setbeamersize{text margin left=1.2cm, text margin right=1.2cm} 
+\setbeamercolor{background canvas}{bg=PaperWhite} 
+\setbeamercolor{normal text}{fg=Obsidian}    
+\setbeamercolor{frametitle}{fg=Obsidian, bg=PaperWhite} 
+\setbeamercolor{section in toc}{fg=Obsidian}
+\setbeamercolor{subsection in toc}{fg=TechViolet}
+\setbeamercolor{item}{fg=VividViolet} 
 
-% --- 5. SETUP BEAMER ---
-\setbeamercolor{background canvas}{bg=PaperWhite}
-\setbeamercolor{normal text}{fg=DarkText}
-\setbeamercolor{frametitle}{fg=Obsidian}
-\setbeamertemplate{navigation symbols}{}
-\setbeamertemplate{headline}{}
-\setbeamertemplate{footline}{}
+\setbeamertemplate{navigation symbols}{} 
+\setbeamertemplate{headline}{} 
 
-% --- 6. HEADER PULITO ---
+% =========================================================
+% 3. HEADER & FOOTER
+% =========================================================
 \setbeamertemplate{frametitle}{
-    \vspace{0.6cm}
-    \begin{beamercolorbox}[wd=\paperwidth, left]{frametitle}
-        \hspace{1.2cm} 
-        {\fontseries{b}\selectfont \Large \insertframetitle}
-        \par\vspace{0.15cm}
-        \hspace{1.2cm}
-        \begin{tikzpicture}
-            \fill[VividViolet] (0,0) rectangle (1.5, 0.08);
-        \end{tikzpicture}
+    \nointerlineskip
+    \begin{beamercolorbox}[wd=\paperwidth, ht=1.3cm, dp=0.4cm, leftskip=0.8cm]{frametitle}
+        \raisebox{0.3cm}{\textbf{\Large \insertframetitle}}
+        \tikz[overlay, remember picture] {
+            \shade[left color=VividViolet, right color=CyanGlow] 
+            (0, 0.05) rectangle (\paperwidth, 0.1);
+        }
     \end{beamercolorbox}
 }
 
-% Footer minimale
 \setbeamertemplate{footline}{
-    \begin{tikzpicture}[remember picture, overlay]
-        \node[anchor=south east, xshift=-0.8cm, yshift=0.5cm, text=gray!40] at (current page.south east) {\footnotesize \fontseries{l}\selectfont \insertframenumber};
+    \leavevmode%
+    \hbox{%
+        \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.5ex,dp=1.125ex,leftskip=.5cm]{author in head/foot}%
+            \color{gray}\scriptsize\insertshortauthor
+        \end{beamercolorbox}%
+        \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.5ex,dp=1.125ex,center]{title in head/foot}%
+            \color{gray!60}\scriptsize\insertshorttitle
+        \end{beamercolorbox}%
+        \begin{beamercolorbox}[wd=.33\paperwidth,ht=2.5ex,dp=1.125ex,rightskip=.5cm]{date in head/foot}%
+            \hfill \textbf{\color{TechViolet}\insertframenumber} \color{gray!40}/ \inserttotalframenumber
+        \end{beamercolorbox}%
+    }%
+    \begin{tikzpicture}[overlay, remember picture]
+        \draw[gray!10, fill=gray!10] (current page.south west) rectangle (current page.south east);
+        \ifnum\inserttotalframenumber>0
+            \fill[VividViolet] (current page.south west) rectangle 
+            ($(current page.south west)!\insertframenumber/\inserttotalframenumber!(current page.south east) + (0, 2pt)$);
+        \fi
     \end{tikzpicture}
+    \vskip0pt%
 }
 
-% --- 7. STILE CODICE ---
+% =========================================================
+% 4. TRANSIZIONI SEZIONI
+% =========================================================
+\AtBeginSection[]{
+    {
+        \setbeamercolor{background canvas}{bg=DeepBlack} 
+        \begin{frame}[plain, noframenumbering]
+            \centering
+            \begin{tikzpicture}
+                \node[circle, fill=VividViolet, opacity=0.10, minimum size=5.5cm] at (0,0) {};
+                \node[circle, fill=VividViolet, opacity=0.20, minimum size=4.8cm] at (0,0) {};
+                \node[circle, draw=VividViolet, line width=2.5pt, minimum size=4cm] (ring) at (0,0) {};
+                
+                \node[text=CyanGlow, font=\fontsize{80}{90}\selectfont\bfseries] at (0,0) {\thesection};
+                
+                \node[below=2.0cm of ring, text=PaperWhite, font=\fontsize{24}{28}\selectfont\bfseries, align=center] (title) {\insertsection};
+                
+                \draw[NeonPink, thick] ($(title.south west) + (-1, -0.2)$) -- ($(title.south east) + (1, -0.2)$);
+            \end{tikzpicture}
+        \end{frame}
+    }
+}
+
+% =========================================================
+% 5. STILI BOX
+% =========================================================
+\tcbset{
+    enhanced,
+    colback=white,
+    colframe=Obsidian,
+    coltitle=white,
+    fonttitle=\bfseries,
+    boxrule=0.5pt,
+    arc=3mm,
+    drop shadow={opacity=0.1, shadow xshift=1pt, shadow yshift=-1pt} 
+}
+
+% =========================================================
+% 6. CODICE
+% =========================================================
 \lstset{
-    basicstyle=\ttfamily\small\color{DarkText},
-    backgroundcolor=\color{gray!5},
+    basicstyle=\ttfamily\small\color{Obsidian},
+    backgroundcolor=\color{LightGray},
     keywordstyle=\color{VividViolet}\bfseries,
-    stringstyle=\color{gray!60},
-    commentstyle=\color{gray!50}\itshape,
-    numberstyle=\tiny\color{gray!30},
+    stringstyle=\color{cyan!80!black},
+    commentstyle=\color{gray}\itshape,
+    numberstyle=\tiny\color{gray!50},
     numbers=left, frame=none, 
     aboveskip=1em, belowskip=1em, xleftmargin=15pt, breaklines=true
 }
 
-% --- 8. SLIDE TITOLO ---
-\input{section/title.tex}
+% =========================================================
+% 7. METADATI
+% =========================================================
+\title[SemEval-2026 Task 13]{GenAI Code Detection \& Attribution}
+\author{Giovanni Giuseppe Iacuzzo}
+\institute{Kore University of Enna}
+\date{\today}
 
-% --- DOCUMENTO ---
 \begin{document}
 
-\begin{frame}[plain]
-  \titlepage
-\end{frame}
+% --- 1. TITLE PAGE: DARK & CYBER ---
+\input{section/title.tex}
 
-% ROADMAP
+% --- 2. ROADMAP ---
 \input{section/section_index.tex}
 
-% --- INCLUSIONE SEZIONI ---
+% --- 3. CONTENUTI ---
 \input{section/section_1.tex}
 \input{section/section_2.tex}
 \input{section/section_3.tex}

@@ -4,7 +4,7 @@
 \begin{frame}{Subtask C: La Sfida delle "Zone Grigie"}
     Oltre alla distinzione binaria, il modello deve classificare scenari ad alta ambiguità (4 Classi).
     \vspace{0.3cm}
-
+    \pause
     \begin{columns}[t]
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colframe=gray!50, colback=white, title=\faCheckCircle\ Classi "Pure", fonttitle=\bfseries\footnotesize, height=3.2cm, drop shadow]
@@ -17,6 +17,7 @@
                 \centering \textit{Facilmente separabili.}
             \end{tcolorbox}
         \end{column}%
+        \pause
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colframe=Obsidian, colback=white, title=\faExclamationTriangle\ Classi "Rumorose", fonttitle=\bfseries\footnotesize, height=3.2cm, drop shadow]
                 \footnotesize
@@ -27,7 +28,7 @@
             \end{tcolorbox}
         \end{column}%
     \end{columns}
-
+    \pause
     \vspace{0.3cm}
     \centering
     \begin{tcolorbox}[colback=VividViolet!5, colframe=VividViolet, width=0.95\textwidth, arc=2mm, boxrule=0.5pt]
@@ -39,7 +40,7 @@
 % SLIDE C.2: TRAINING STRATEGY
 \begin{frame}{Subtask C: Advanced Training Strategy}
     Per gestire classi ibride e sbilanciate, utilizziamo una combinazione pesata di loss functions.
-    
+    \pause
     \vspace{0.3cm}
     \begin{tcolorbox}[enhanced, title={Hybrid Loss Function ($\alpha=0.5$)}, colframe=Obsidian, colback=white, fonttitle=\bfseries\small, drop shadow]
         $$ \mathcal{L}_{Total} = \mathcal{L}_{Focal} + \alpha \cdot \mathcal{L}_{SupCon} $$
@@ -72,7 +73,7 @@
 \begin{frame}{Subtask C: Rilevamento Offuscamento}
     Estrattore parallelo (\texttt{ProcessPoolExecutor}) per feature di sicurezza.
     \vspace{0.2cm}
-
+    \pause
     \begin{columns}[T]
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colback=white, colframe=VividViolet, title=\faRandom\ Entropy \& Complexity, fonttitle=\bfseries\small, drop shadow]
@@ -85,6 +86,7 @@
                 \end{itemize}
             \end{tcolorbox}
         \end{column}%
+        \pause
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=\faShield*\ Payload Detection, fonttitle=\bfseries\small, drop shadow]
                 \begin{itemize}

@@ -51,7 +51,7 @@
             \end{tcolorbox}
             
             \vspace{0.3cm}
-            
+            \pause
             % RISCHIO (Box di Allerta Leggibile)
             \begin{tcolorbox}[
                 enhanced,
@@ -94,7 +94,7 @@
             \end{tcolorbox}
         \end{column}
     \end{columns}
-    
+    \pause
     \vspace{0.3cm}
     
     % --- CORREZIONE QUI ---
@@ -109,7 +109,7 @@
         right=2pt, top=2pt, bottom=2pt
     ]
         \small
-        \textbf{\faExclamationTriangle \ Osservazione Critica:}
+        \textbf{\faExclamationTriangle \ Osservazione:}
         Nel Test set compaiono \textbf{Go, PHP e C\#}. 
         Se il nostro modello si è basato su \textit{keyword} specifiche di Python (es. `def`, `import`), fallirà miseramente qui. Serve astrazione.
     \end{tcolorbox}
@@ -118,9 +118,9 @@
 \begin{frame}{Code Properties: Human vs AI Verbosity}
     \vspace{-0.2cm}
     \small
-    Esiste una differenza strutturale tra codice Umano e AI? Sì: la \textbf{Lunghezza}.
+    Esiste una differenza strutturale tra codice Umano e AI? \pause Sì: la \textbf{Lunghezza}.
     \vspace{0.2cm}
-
+    \pause
     \begin{columns}[c]
         % GRAFICO
         \begin{column}{0.6\textwidth}
@@ -146,7 +146,7 @@
                 \\
                 In contesti algoritmici (es. LeetCode), l'umano punta all'essenziale, omettendo commenti e ottimizzando la brevità.
             \end{itemize}
-            
+            \pause
             \vspace{0.4cm}
             
             % Insight finale
@@ -184,7 +184,7 @@
                     \item \texttt{deepseek-coder} $\to$ \textbf{DeepSeek}
                 \end{itemize}
             \end{tcolorbox}
-            
+            \pause
             \vspace{0.1cm}
             
             \begin{tcolorbox}[colback=VividViolet!10, frame hidden, title=\color{VividViolet}\faBalanceScale\ The Issue, coltitle=VividViolet, fonttitle=\bfseries\scriptsize]
@@ -199,7 +199,7 @@
 \begin{frame}{Task B: Stylistic Fingerprints}
     \vspace{-0.2cm}
     \small
-    Ogni famiglia di modelli ha una "firma" unica? Sì, la \textbf{lunghezza dei token} lo rivela.
+    Ogni famiglia di modelli ha una "firma" unica? \pause Sì, la \textbf{lunghezza dei token} lo rivela.\pause
     \vspace{0.2cm}
 
     \begin{columns}[T]
@@ -237,7 +237,7 @@
 \begin{frame}{Task B: Model Specialization}
     \vspace{-0.2cm}
     \small
-    Esiste una correlazione tra Generatore e Linguaggio? La Heatmap rivela bias specifici.
+    Esiste una correlazione tra Generatore e Linguaggio? \pause La Heatmap rivela bias specifici.\pause
     \vspace{0.2cm}
     
     \begin{columns}[T]
@@ -297,7 +297,7 @@
                 \item \textbf{Dominanti (Classes 0-1):} Human e Machine pure coprono la maggioranza del dataset.
                 \item \textbf{Rare (Classes 2-3):} Hybrid e Adversarial sono meno frequenti.
             \end{itemize}
-            
+            \pause
             \vspace{0.3cm}
             
             \begin{tcolorbox}[colback=VividViolet!10, frame hidden, left=2pt, right=2pt]
@@ -330,7 +330,7 @@
             \scriptsize
             Molti Transformer (es. CodeBERT) hanno un limite di 512 token.
             \vspace{0.2cm}
-            
+            \pause
             \begin{tcolorbox}[colback=gray!5, colframe=Obsidian, title=\textbf{Analysis}, fonttitle=\bfseries\tiny, left=2pt]
                 \tiny
                 Se un file Hybrid ha la parte AI alla riga 100 (token 800+), un modello standard la taglierà via, predicendo erroneamente "Human".

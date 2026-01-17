@@ -1,36 +1,19 @@
 {
     \setbeamercolor{background canvas}{bg=PaperWhite}
-    % Forziamo Beamer a considerare il testo nero in questo contesto
     \setbeamercolor{section in toc}{fg=Obsidian} 
-    \setbeamercolor{section number projected}{bg=VividViolet,fg=white}
-    
-    % --- FIX FONDAMENTALE PER I COLORI ---
-    % Reimpostiamo il colore dei link SOLO per questa slide per evitare che 
-    % tornino bianchi ereditando le impostazioni globali
     \hypersetup{linkcolor=Obsidian}
 
-    % --- DESIGN DEL "BOTTONE" DELL'INDICE ---
     \setbeamertemplate{section in toc}{
         \begin{tikzpicture}
             \node[
-                draw=gray!20,
-                fill=white,
-                rounded corners=3pt,
-                inner sep=8pt,
-                text width=0.36\paperwidth,
-                align=left,
-                drop shadow={opacity=0.05, shadow xshift=2pt, shadow yshift=-2pt},
-                % --- MODIFICA QUI: Forziamo il colore del testo del nodo ---
-                text=Obsidian 
+                draw=gray!20, fill=white, rounded corners=3pt,
+                inner sep=8pt, text width=0.36\paperwidth, align=left,
+                blur shadow={shadow opacity=0.1}, text=Obsidian 
             ] (box) {
-                % Numero Sezione
                 {\color{VividViolet}\bfseries\large \inserttocsectionnumber}
                 \hspace{0.2cm}
-                % Linea verticale
                 {\color{gray!30}\vrule width 1pt} 
                 \hspace{0.2cm}
-                % Titolo Sezione
-                % Usiamo \textcolor esplicito per sovrascrivere qualsiasi impostazione beamer
                 {\color{Obsidian}\bfseries \inserttocsection}
             };
         \end{tikzpicture}
@@ -38,36 +21,26 @@
     }
 
     \begin{frame}[plain]
-        
-        % --- INTESTAZIONE ---
         \begin{tikzpicture}[remember picture, overlay]
-            \fill[Obsidian] (current page.north west) rectangle ([yshift=-2.5cm]current page.north east);
-            
+            \fill[DeepBlack] (current page.north west) rectangle ([yshift=-2.5cm]current page.north east);
             \node[anchor=west] at ([xshift=1cm, yshift=-1.2cm]current page.north west) {
                 \fontsize{32}{36}\selectfont \bfseries \color{white} Roadmap
             };
-            
             \node[anchor=east] at ([xshift=-1cm, yshift=-1.2cm]current page.north east) {
                 \color{CyanGlow} \faMap \ SemEval-2026
             };
-            
             \fill[VividViolet] ([yshift=-2.5cm]current page.north west) rectangle ([yshift=-2.6cm]current page.north east);
         \end{tikzpicture}
     
         \vspace{2.5cm} 
         
-        % --- INDICE A DUE COLONNE ---
         \begin{columns}[t]
             \begin{column}{0.48\textwidth}
-                % COLONNA 1: Sezioni da 1 a 3
                 \tableofcontents[sections={1-3}] 
             \end{column}
-            
             \begin{column}{0.48\textwidth}
-                % COLONNA 2: Sezioni da 4 alla fine
                 \tableofcontents[sections={4-10}]
             \end{column}
         \end{columns}
-        
     \end{frame}
 }

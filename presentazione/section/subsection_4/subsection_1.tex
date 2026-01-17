@@ -13,7 +13,7 @@
             \end{tcolorbox}
             \centering \tiny \textit{Validation F1-Macro (Peak: \textbf{0.993})}
         \end{column}
-
+        \pause
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, title=Convergenza Ottimale, colframe=VividViolet, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
                 \footnotesize
@@ -44,7 +44,7 @@
                 \includegraphics[width=\textwidth, height=3.6cm, keepaspectratio]{img/results_subtask_a/confusion_matrix.png}
             \end{tcolorbox}
         \end{column}
-
+        \pause
         \begin{column}{0.53\textwidth}
             \begin{tcolorbox}[enhanced, title=\faCheckDouble\ Near-Zero Errors, colframe=Obsidian, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
                 \footnotesize
@@ -67,7 +67,6 @@
     \small
     \textbf{Il Paradosso:} Training perfetto vs crollo delle performance sui dati di Test ciechi (Kaggle).
     \vspace{0.2cm}
-
     \begin{columns}[t]
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colback=VividViolet!10, colframe=VividViolet, title=Validation (Python/Java), fonttitle=\bfseries\footnotesize, halign=center]
@@ -76,6 +75,7 @@
                 \\ \scriptsize \faCheck\ \textit{Seen Syntax}
             \end{tcolorbox}
         \end{column}
+        \pause
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colback=red!10, colframe=red!60!black, title=Test (Go/PHP/...), fonttitle=\bfseries\footnotesize, halign=center]
                 \Large \textbf{$\approx$ 0.45}
@@ -84,7 +84,6 @@
             \end{tcolorbox}
         \end{column}
     \end{columns}
-
     \vspace{0.2cm}
     
     \begin{tcolorbox}[colback=gray!5, colframe=Obsidian, title=\faSearch\ Root Cause: Overfitting Sintattico, fonttitle=\bfseries\footnotesize]

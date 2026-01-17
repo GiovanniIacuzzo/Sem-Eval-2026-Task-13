@@ -26,9 +26,8 @@
         \path [line] (dec) -- node [right, font=\tiny] {NO} (human);
         \path [line] (stage2) -- (family);
     \end{tikzpicture}
-
+    \pause
     \vspace{0.3cm}
-    % NOTA: I % alla fine delle righe delle colonne sono FONDAMENTALI in Beamer
     \begin{columns}[t, onlytextwidth]
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=\faFilter\ Stage 1: Binary Filter, fonttitle=\bfseries\tiny, arc=2mm]
@@ -56,19 +55,15 @@
         layer/.style={rectangle, draw=Obsidian, fill=white, rounded corners=2pt, minimum width=2.5cm, minimum height=0.8cm, drop shadow},
         arrow/.style={->, >=stealth, thick, darkgray}
     ]
-        % Backbone
         \node[layer, fill=VividViolet!10] (backbone) {\textbf{UniXcoder}};
         \node[layer, below=0.5cm of backbone] (pooler) {\textbf{Attn Pooler}};
         
-        % Heads Branching (Semplificato per evitare errori di positioning)
         \node[layer, below left=0.8cm and 0.1cm of pooler, fill=CyanGlow!10] (supcon) {\textbf{SupCon Head}};
         \node[layer, below right=0.8cm and 0.1cm of pooler] (class) {\textbf{Class Head}};
 
-        % Losses
         \node[below=0.2cm of supcon, align=center, font=\scriptsize] (loss1) {\textbf{SupCon Loss}};
         \node[below=0.2cm of class, align=center, font=\scriptsize] (loss2) {\textbf{Focal Loss}};
 
-        % Connections
         \draw[arrow] (backbone) -- (pooler);
         \draw[arrow] (pooler) -- (supcon);
         \draw[arrow] (pooler) -- (class);
@@ -77,8 +72,8 @@
     \end{tikzpicture}
 
     \vspace{0.2cm}
+    \pause
     
-    % Box senza centering esterno e senza itemize complesso
     \begin{tcolorbox}[colback=gray!5, colframe=gray!30, left=1mm, boxrule=0pt, arc=2mm]
         \footnotesize
         \textbf{Loss Function Ibrida:} $\mathcal{L}_{total} = \mathcal{L}_{Focal} + 0.5 \cdot \mathcal{L}_{SupCon}$
@@ -94,7 +89,7 @@
 \begin{frame}{Subtask B: Profiling Stilistico}
     Analisi di 8 feature strutturali estratte in tempo reale (\textit{On-the-fly}).
     \vspace{0.2cm}
-    
+    \pause
     \begin{columns}[T, onlytextwidth]
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colback=white, colframe=VividViolet, title=\faCode\ Syntactic Markers, fonttitle=\bfseries\small, drop shadow]
@@ -107,6 +102,7 @@
                 \end{itemize}
             \end{tcolorbox}
         \end{column}%
+        \pause
         \begin{column}{0.48\textwidth}
             \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=\faAlignLeft\ Lexical Markers, fonttitle=\bfseries\small, drop shadow]
                 \begin{itemize}
