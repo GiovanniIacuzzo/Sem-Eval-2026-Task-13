@@ -1,0 +1,103 @@
+\subsection*{Subtask C: Performance Analysis}
+
+% SLIDE 1: BINARY MODEL (Problemi Nascosti)
+\begin{frame}{Subtask C (Binary): Human vs Machine}
+    \small
+    Il modello binario mostra ottime metriche di validazione, ma l'approccio basato su feature statiche ha dei limiti intrinseci.
+    \vspace{0.1cm}
+
+    \begin{columns}[c]
+        \begin{column}{0.5\textwidth}
+            \begin{tcolorbox}[colback=white, colframe=gray!20, boxrule=0.5pt, sharp corners]
+                \centering
+                % Uso le virgolette per gestire gli spazi nel nome file
+                \includegraphics[width=\textwidth, height=3.0cm, keepaspectratio]{"img/results_subtask_c/binary/Val_f1_macro VS step.jpeg"}
+            \end{tcolorbox}
+            \centering \tiny \textit{Binary F1 (Validation)}
+        \end{column}
+
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faExclamationTriangle\ Fragilità Strutturale, colframe=Obsidian, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \begin{itemize}
+                    \item \textbf{High Validation:} F1 alto sui dati noti.
+                    \item \textbf{Il Problema:} Il modello si affida troppo a picchi di entropia standard per rilevare le macchine.
+                \end{itemize}
+                
+                \tcblower
+                
+                \textbf{Limite:}
+                \\ Se l'attaccante cambia metodo di offuscamento (es. riduce l'entropia artificialmente), il classificatore binario diventa cieco.
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+% SLIDE 2: ATTRIBUTION MODEL (Punti di Forza)
+\begin{frame}{Subtask C (Attribution): AI vs Hybrid vs Adv}
+    \small
+    Qui l'architettura mostra i suoi muscoli: la separazione fine-grained è molto stabile durante il training.
+    \vspace{0.1cm}
+
+    \begin{columns}[c]
+        \begin{column}{0.5\textwidth}
+            \begin{tcolorbox}[colback=white, colframe=gray!20, boxrule=0.5pt, sharp corners]
+                \centering
+                % Uso le virgolette per gestire gli spazi nel nome file
+                \includegraphics[width=\textwidth, height=3.0cm, keepaspectratio]{"img/results_subtask_c/machine_attribution/Val_f1_macro VS step.jpeg"}
+            \end{tcolorbox}
+            \centering \tiny \textit{Attribution F1-Macro (Validation)}
+        \end{column}
+
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faCheckCircle\ Training Robusto, colframe=VividViolet, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \begin{itemize}
+                    \item \textbf{Convergenza:} Nessuna oscillazione, segno che la SupCon Loss sta lavorando bene sui cluster.
+                    \item \textbf{Hybrid Detection:} Il modello riesce a distinguere efficacemente il codice ibrido da quello puramente generato nei dati di training.
+                \end{itemize}
+                
+                \tcblower
+                \textbf{Punto di Forza:}
+                \\ L'architettura è capace di apprendere sfumature complesse quando i pattern sono rappresentati nel dataset.
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+% SLIDE 3: IL CONFRONTO TEST (Top 5 vs Crollo)
+\begin{frame}{Subtask C: The "Scale Shock" (Test Results)}
+    \small
+    Il confronto tra il test preliminare e quello finale evidenzia un drastico \textbf{Distribution Shift}.
+    \vspace{0.1cm}
+
+    \begin{columns}[t]
+        \begin{column}{0.48\textwidth}
+            % Box Verde: Successo Iniziale
+            \begin{tcolorbox}[enhanced, colback=CyanGlow!10, colframe=CyanGlow!80!black, title={Sample Test (Top 5)}, fonttitle=\bfseries\scriptsize, halign=center]
+                \Large \textbf{$\approx$ 0.85}
+                \\ \scriptsize F1-Macro
+                \\ \tiny \faTrophy\ \textit{Leaderboard Preliminare}
+            \end{tcolorbox}
+        \end{column}
+        \begin{column}{0.48\textwidth}
+            % Box Rosso: Crollo Finale
+            \begin{tcolorbox}[enhanced, colback=red!10, colframe=red!60!black, title={Full Test (500k)}, fonttitle=\bfseries\scriptsize, halign=center]
+                \Large \textbf{$\approx$ 0.45}
+                \\ \scriptsize F1-Macro
+                \\ \tiny \faBomb\ \textit{New Adversarial Methods}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+
+    \vspace{0.1cm}
+    
+    \begin{tcolorbox}[colback=gray!5, colframe=Obsidian, title=\faSearch\ Diagnosi: Cosa è successo?, fonttitle=\bfseries\footnotesize]
+        \footnotesize
+        Nonostante la forza del modello Attribution (Slide 2), il Full Test ha introdotto scenari imprevisti:
+        \begin{itemize}
+            \item \textbf{Scale Shock:} Su 500k esempi, il rumore statistico aumenta esponenzialmente.
+            \item \textbf{Unseen Attacks:} Probabile presenza di attacchi avversari non basati su entropia, che hanno bypassato le nostre feature statiche.
+        \end{itemize}
+    \end{tcolorbox}
+\end{frame}

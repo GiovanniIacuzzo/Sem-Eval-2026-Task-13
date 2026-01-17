@@ -1,0 +1,104 @@
+\subsection*{Subtask C: Hybrid \& Adversarial Scenarios}
+
+% SLIDE C.1: DEFINIZIONE
+\begin{frame}{Subtask C: La Sfida delle "Zone Grigie"}
+    Oltre alla distinzione binaria, il modello deve classificare scenari ad alta ambiguità (4 Classi).
+    \vspace{0.3cm}
+
+    \begin{columns}[t]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colframe=gray!50, colback=white, title=\faCheckCircle\ Classi "Pure", fonttitle=\bfseries\footnotesize, height=3.2cm, drop shadow]
+                \footnotesize
+                \begin{itemize}
+                    \item \textbf{Human (0):} Logica imperfetta.
+                    \item \textbf{AI-Generated (1):} Pattern statistici puliti.
+                \end{itemize}
+                \vspace{0.1cm}
+                \centering \textit{Facilmente separabili.}
+            \end{tcolorbox}
+        \end{column}%
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colframe=Obsidian, colback=white, title=\faExclamationTriangle\ Classi "Rumorose", fonttitle=\bfseries\footnotesize, height=3.2cm, drop shadow]
+                \footnotesize
+                \begin{itemize}
+                    \item \textbf{\faUserCog\ Hybrid (2):} AI + Umano. \textit{Discontinuità stilistica.}
+                    \item \textbf{\faMask\ Adversarial (3):} Offuscato. \textit{Alta entropia.}
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}%
+    \end{columns}
+
+    \vspace{0.3cm}
+    \centering
+    \begin{tcolorbox}[colback=VividViolet!5, colframe=VividViolet, width=0.95\textwidth, arc=2mm, boxrule=0.5pt]
+        \centering \small 
+        \faCrosshairs\ \textbf{Obiettivo:} Robustezza. Riconoscere la manipolazione.
+    \end{tcolorbox}
+\end{frame}
+
+% SLIDE C.2: TRAINING STRATEGY
+\begin{frame}{Subtask C: Advanced Training Strategy}
+    Per gestire classi ibride e sbilanciate, utilizziamo una combinazione pesata di loss functions.
+    
+    \vspace{0.3cm}
+    \begin{tcolorbox}[enhanced, title={Hybrid Loss Function ($\alpha=0.5$)}, colframe=Obsidian, colback=white, fonttitle=\bfseries\small, drop shadow]
+        $$ \mathcal{L}_{Total} = \mathcal{L}_{Focal} + \alpha \cdot \mathcal{L}_{SupCon} $$
+    \end{tcolorbox}
+
+    \vspace{0.2cm}
+    \begin{columns}[T]
+        \begin{column}{0.48\textwidth}
+            \textbf{1. Focal Loss ($\gamma=2.0$)}
+            \vspace{0.1cm}
+            \begin{itemize}
+                \footnotesize
+                \item Penalizza gli esempi "Hard" (Hybrid).
+                \item \textit{Smoothing:} $\epsilon=0.1$ per evitare overconfidence.
+            \end{itemize}
+        \end{column}%
+        \begin{column}{0.48\textwidth}
+            \textbf{2. SupCon Loss ($\tau=0.07$)}
+            \vspace{0.1cm}
+            \begin{itemize}
+                \footnotesize
+                \item \textbf{Push:} Massimizza distanza Human-Hybrid.
+                \item \textbf{Pull:} Compatta i cluster della stessa classe.
+            \end{itemize}
+        \end{column}%
+    \end{columns}
+\end{frame}
+
+% SLIDE C.3: FEATURE ADVERSARIAL
+\begin{frame}{Subtask C: Rilevamento Offuscamento}
+    Estrattore parallelo (\texttt{ProcessPoolExecutor}) per feature di sicurezza.
+    \vspace{0.2cm}
+
+    \begin{columns}[T]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=VividViolet, title=\faRandom\ Entropy \& Complexity, fonttitle=\bfseries\small, drop shadow]
+                \begin{itemize}
+                    \setlength\itemsep{0.6em}
+                    \item \textbf{Shannon Entropy:} 
+                    \\ \scriptsize Picchi di entropia indicano rinomina casuale delle variabili.
+                    \item \textbf{Nesting Depth:} 
+                    \\ \scriptsize L'offuscamento crea nesting innaturali di \texttt{\{\}}.
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}%
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=\faShield*\ Payload Detection, fonttitle=\bfseries\small, drop shadow]
+                \begin{itemize}
+                    \setlength\itemsep{0.6em}
+                    \item \textbf{Long String Ratio:} 
+                    \\ \scriptsize Rilevamento Regex \texttt{"[\textasciicircum"]\{50,\}"} di stringhe sospette (es. Base64).
+                    \item \textbf{Keyword Density:} 
+                    \\ \scriptsize Diluizione delle keyword sintattiche standard.
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}%
+    \end{columns}
+    
+    \vspace{0.3cm}
+    \centering \footnotesize
+    \faCogs\ \textit{Implementation Note:} Feature normalizzate ed estratte con multiprocessing.
+\end{frame}

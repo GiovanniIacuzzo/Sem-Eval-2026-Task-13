@@ -1,3 +1,123 @@
 % --- SEZIONE 4: RISULTATI DEL TASK ---
 \section{Risultati del Task}
 
+% ---------------------------------------------------------
+% 4.1 SUBTASK A (Binary Classification)
+% ---------------------------------------------------------
+\input{section/subsection_4/subsection_1.tex}
+
+% ---------------------------------------------------------
+% 4.2 SUBTASK B (Multi-Class & Cascade)
+% ---------------------------------------------------------
+\input{section/subsection_4/subsection_2.tex}
+
+% ---------------------------------------------------------
+% 4.3 SUBTASK C (Hybrid & Adversarial)
+% ---------------------------------------------------------
+\input{section/subsection_4/subsection_3.tex}
+
+% ---------------------------------------------------------
+% 4.4 INFRASTRUCTURE & DEPLOYMENT
+% ---------------------------------------------------------
+\subsection*{Infrastructure \& Archiving}
+
+\begin{frame}{Computational Landscape: La Sfida Hardware}
+    \small
+    Il training su dataset massivi (500k+ campioni) ha richiesto una gestione aggressiva delle risorse cloud.
+    \vspace{0.1cm}
+
+    \begin{columns}[c]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faServer\ Infrastructure Setup, colframe=Obsidian, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \textbf{Platform:} Lightning AI Studio
+                \par\vspace{0.1cm}
+                \textbf{Hardware:} \textbf{NVIDIA L4} (24GB VRAM)
+                \par\vspace{0.1cm}
+                \textbf{Strategy:}
+                \begin{itemize}
+                    \setlength\itemsep{0em}
+                    \item Training distribuito multi-account.
+                    \item Checkpointing frequente anti-timeout.
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}
+
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faStopwatch\ Training Cost, colframe=VividViolet, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \centering
+                \LARGE \textbf{> 150h}
+                \\ \footnotesize GPU Compute Time
+                \vspace{0.1cm}
+                \\ \scriptsize \faBolt\ \textit{High-Intensity Workload}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+
+    \vspace{0.2cm}
+    \begin{tcolorbox}[colback=gray!5, colframe=CyanGlow!80!black, title=\faMicrochip\ Optimization Strategy, fonttitle=\bfseries\footnotesize]
+        \footnotesize
+        Gestione del fine-tuning di UniXcoder su L4 tramite \textbf{Mixed Precision (FP16)} e \textbf{Gradient Accumulation} per simulare batch size elevati senza OOM (Out Of Memory).
+    \end{tcolorbox}
+\end{frame}
+
+\begin{frame}{Model Archiving \& Reproducibility}
+    \small
+    Tutti gli artefatti sono stati versionati su Hugging Face (Private Hub) per audit e riproducibilità.
+    \vspace{0.1cm}
+
+    \begin{columns}[T]
+        \begin{column}{0.38\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faDatabase\ Digital Assets, colframe=Obsidian, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \textbf{Account:}
+                \\ \texttt{GiovanniIacuzzo02}
+                \par\vspace{0.2cm}
+                
+                \textbf{Total Storage:}
+                \\ $\approx$ \textbf{1.5 GB} (Weights + Logs)
+                \par\vspace{0.2cm}
+                
+                \textbf{Artifacts:}
+                \\ \faFileCode\ \texttt{model\_state.bin}
+                \\ \faCogs\ \texttt{training\_meta.yaml}
+                \\ \faKey\ \texttt{tokenizer.json}
+                \par\vspace{0.2cm}
+                
+                \centering
+                \fcolorbox{gray}{gray!10}{\scriptsize \faLock\ Private Repo Access}
+            \end{tcolorbox}
+        \end{column}
+
+        \begin{column}{0.60\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faSitemap\ Repository Structure, colframe=VividViolet, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \scriptsize
+                \setlength{\leftmargini}{1em}
+                
+                \textbf{1. Subtask A (Single Model)}
+                \\ \texttt{SemEval2026\_Task13\_subtask\_A}
+                \begin{itemize}
+                    \item[\faFile] \texttt{best\_model/model\_state.bin}
+                \end{itemize}
+                \vspace{0.1cm}
+
+                \textbf{2. Subtask B (Cascade Architecture)}
+                \\ \texttt{SemEval2026\_Task13\_subtask\_B}
+                \begin{itemize}
+                    \setlength\itemsep{0em}
+                    \item[\faFolderOpen] \textbf{\texttt{binary/}} $\to$ \textit{Gatekeeper Weights}
+                    \item[\faFolderOpen] \textbf{\texttt{families/}} $\to$ \textit{Multiclass Weights}
+                \end{itemize}
+                \vspace{0.1cm}
+
+                \textbf{3. Subtask C (Modular System)}
+                \\ \texttt{SemEval2026\_Task13\_subtask\_C}
+                \begin{itemize}
+                    \setlength\itemsep{0em}
+                    \item[\faFolderOpen] \textbf{\texttt{stage1\_binary\_human\_machine/}}
+                    \item[\faFolderOpen] \textbf{\texttt{stage2\_machine\_attribution/}}
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+\end{frame}

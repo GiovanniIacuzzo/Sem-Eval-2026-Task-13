@@ -1,12 +1,125 @@
-% --- CONCLUSIONI ---
+% =========================================================
+% SEZIONE 5: CONCLUSIONI
+% =========================================================
 \section{Conclusioni}
 
-\begin{frame}
-  \centering
-  \Huge \textbf{Grazie per l'attenzione}
-  
-  \vspace{1cm}
-  \normalsize
-  \faGithub\ \texttt{github.com/giovanniIacuzzo} \\
-  \faEnvelope\ \texttt{giovanni.iacuzzo@unikore.it}
+\begin{frame}{Bilancio Finale: "The Good, The Bad and The Overfit"}
+    Un percorso di 150+ ore di GPU che ha insegnato una dura lezione: \textbf{Il Validation Set mente.}
+    \vspace{0.1cm}
+
+    \begin{columns}[t]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faThumbsDown\ The "Reality Check" (A \& C), colframe=red!60!black, colback=red!5, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \textbf{L'Illusione:} Vedere F1 $> 0.99$ in locale.
+                \par\vspace{0.1cm}
+                \textbf{La Realtà:} Il modello aveva memorizzato la sintassi (Python/Java) invece della semantica. Di fronte a Go/PHP o ad attacchi massivi, \textbf{è crollato}.
+                \par\vspace{0.1cm}
+                \textit{"Frustrante? Sì. Istruttivo? Assolutamente."}
+            \end{tcolorbox}
+        \end{column}
+
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faThumbsUp\ The Success Story (Task B), colframe=CyanGlow!80!blue, colback=CyanGlow!5, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \textbf{Il Riscatto:} L'approccio a Cascata + SupCon ha funzionato.
+                \par\vspace{0.1cm}
+                \textbf{Risultato:} 7\textsuperscript{o} posto su Kaggle, incollato alla Top 5.
+                \par\vspace{0.1cm}
+                \textit{Dimostra che su domini circoscritti (11 famiglie), l'architettura è solida.}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+
+    \vspace{0.2cm}
+    \centering
+    \begin{tcolorbox}[colback=white, colframe=gray!50, width=0.9\textwidth, boxrule=0.5pt, arc=2mm]
+        \centering \footnotesize \faQuoteLeft\ \textit{Non è il risultato che speravo, ma è l'esperienza tecnica che mi serviva.} \faQuoteRight
+    \end{tcolorbox}
+\end{frame}
+
+\begin{frame}{Legacy: Costruiamo il "Kore AI Lab"}
+    Questa competizione è stata brutale ma formativa. Non voglio che l'esperienza vada persa.
+    \vspace{0.1cm}
+
+    \begin{columns}[c]
+        \begin{column}{0.30\textwidth}
+            \centering
+            \begin{tikzpicture}
+                \node[circle, draw=VividViolet, line width=2pt, inner sep=2pt, fill=white, drop shadow] (icon) {
+                    \includegraphics[width=2.5cm, height=2.5cm, keepaspectratio]{img/Logo_UKE.png}
+                };
+                \node[below=0.2cm of icon, font=\bfseries\small\color{Obsidian}] {Kore University};
+            \end{tikzpicture}
+        \end{column}
+
+        \begin{column}{0.65\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faHandshake\ Proposta per il Futuro, colframe=VividViolet, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                Propongo la creazione di un \textbf{gruppo studentesco competitivo} per le prossime challenge (SemEval, Kaggle).
+                \vspace{0.1cm}
+                
+                \textbf{Il mio contributo per i prossimi studenti:}
+                \begin{itemize}
+                    \setlength\itemsep{0em}
+                    \item \textbf{Mentorship:} Setup ambienti Cloud e gestione GPU L4.
+                    \item \textbf{Assets:} Pipeline di training pronte e debuggate.
+                    \item \textbf{Strategy:} Evitare i miei errori (Overfitting).
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+
+    \centering
+    \begin{tcolorbox}[colback=VividViolet!10, colframe=VividViolet, boxrule=0pt, arc=2mm]
+        \centering \bfseries \color{Obsidian} \small
+        "L'obiettivo non è che io vinca da solo oggi, ma che l'anno prossimo qualcuno della Kore faccia meglio di me."
+    \end{tcolorbox}
+\end{frame}
+
+\begin{frame}[plain]
+    \centering
+    \vspace{0.5cm}
+    
+    {\fontsize{32}{40}\selectfont \color{Obsidian}\textbf{Grazie per l'Attenzione}}
+    
+    \vspace{0.6cm}
+    
+    \begin{tcolorbox}[enhanced, colback=gray!5, colframe=Obsidian, width=0.9\textwidth, arc=3mm, drop shadow]
+        \centering
+        \vspace{0.2cm}
+        
+        \begin{columns}[t]
+            \begin{column}{0.48\textwidth}
+                \centering
+                \large \faGithub\ \textbf{GitHub} \\
+                \texttt{GiovanniIacuzzo}
+                
+                \vspace{0.4cm}
+                
+                \large \faKaggle\ \textbf{Kaggle} \\
+                \texttt{giovanniiacuzzo}
+            \end{column}
+            
+            \begin{column}{0.48\textwidth}
+                \centering
+                \large \faBrain\ \textbf{Hugging Face} \\
+                \texttt{GiovanniIacuzzo02}
+                
+                \vspace{0.4cm}
+                
+                \large \faEnvelope\ \textbf{Email} \\
+                \small \texttt{giovanni.iacuzzo@unikore.it}
+            \end{column}
+        \end{columns}
+        
+        \vspace{0.2cm}
+    \end{tcolorbox}
+
+    \vspace{0.5cm}
+    \small \textit{Code \& Models available via Private Access (Audit Ready)}
+
+    \vfill
+    \footnotesize \textit{SemEval 2026 Task 13 - Project Presentation}
+    \vspace{0.5cm}
 \end{frame}

@@ -1,0 +1,98 @@
+\subsection*{Subtask B: Performance Analysis}
+
+\begin{frame}{Subtask B (Stage 1): Il "Gatekeeper" Binario}
+    \small
+    Il filtro binario raggiunge rapidamente il picco di performance. L'Early Stopping è cruciale.
+    \vspace{0.1cm}
+
+    \begin{columns}[c]
+        \begin{column}{0.5\textwidth}
+            \begin{tcolorbox}[colback=white, colframe=gray!20, boxrule=0.5pt, sharp corners]
+                \centering
+                \includegraphics[width=\textwidth, height=3.0cm, keepaspectratio]{img/results_subtask_b/binary/Val_f1_macro VS step.jpeg}
+            \end{tcolorbox}
+            \centering \tiny \textit{Validation F1 (Peak at Epoch 0)}
+        \end{column}
+
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faShield* Robustezza del Filtro, colframe=Obsidian, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \begin{itemize}
+                    \item \textbf{Convergenza Lampo:} F1 > 0.93 alla prima epoca.
+                    \item \textbf{Strategia:} Usiamo il checkpoint migliore per evitare il degrado successivo.
+                \end{itemize}
+                
+                \tcblower
+                
+                \textbf{Impatto Pipeline:}
+                \\ Filtra aggressivamente i codici umani, proteggendo il classificatore downstream.
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+\begin{frame}{Subtask B (Stage 2): Family Classification}
+    \small
+    La **SupCon Loss** ha creato cluster ben definiti per le 11 famiglie, come visibile dalla diagonale.
+    \vspace{0.1cm}
+
+    \begin{columns}[c]
+        \begin{column}{0.45\textwidth}
+            \centering
+            \begin{tcolorbox}[colback=white, colframe=gray!20, boxrule=1pt, sharp corners]
+                \centering
+                \includegraphics[width=\textwidth, height=3.6cm, keepaspectratio]{img/results_subtask_b/families/families_cm.png}
+            \end{tcolorbox}
+        \end{column}
+
+        \begin{column}{0.53\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faFingerprint\ Fingerprinting Riuscito, colframe=VividViolet, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \begin{itemize}
+                    \item \textbf{Diagonale Netta:} GPT, Llama e Granite sono identificati con altissima precisione.
+                    \item \textbf{Errori Coerenti:} Le confusioni (es. Mistral vs Llama) avvengono tra architetture "cugine".
+                \end{itemize}
+                
+                \tcblower
+                \faChartLine\ \textbf{Metric Learning:}
+                \\ Il modello non memorizza solo le keyword, ma apprende lo stile strutturale.
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+\begin{frame}{Subtask B: Risultati Competitivi (Test Set)}
+    \small
+    Qui la generalizzazione è eccellente. Il gap tra Validation e Test è minimo.
+
+    \begin{columns}[t]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=CyanGlow!10, colframe=CyanGlow!80!black, title=Kaggle Leaderboard, fonttitle=\bfseries\footnotesize, halign=center]
+                \Large \textbf{7\textsuperscript{th}} \footnotesize Place
+                \vspace{0.1cm}
+                \\ \scriptsize \faTrophy\ \textit{Top Tier Performance}
+                \\ \tiny (Gap dal 5\textsuperscript{o}: $\approx 0.001$)
+            \end{tcolorbox}
+        \end{column}
+        
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=Metriche Finali, fonttitle=\bfseries\footnotesize]
+                \footnotesize
+                \begin{itemize}
+                    \item \textbf{F1-Macro:} Allineato con lo State-of-the-Art.
+                    \item \textbf{Robustezza:} Il modello funziona anche su dati "in the wild".
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+
+    \vspace{0.2cm}
+    \begin{tcolorbox}[colback=gray!5, colframe=VividViolet, title=\faLightbulb\ Winning Factors, fonttitle=\bfseries\footnotesize]
+        \footnotesize
+        \textbf{Architettura a Cascata + SupCon:}
+        \begin{itemize}
+            \item \textbf{Divide et Impera:} Separare Binary e Multi-class riduce il rumore.
+            \item \textbf{Deep Style:} Il Metric Learning cattura la struttura profonda, superando l'overfitting superficiale del Task A.
+        \end{itemize}
+    \end{tcolorbox}
+\end{frame}

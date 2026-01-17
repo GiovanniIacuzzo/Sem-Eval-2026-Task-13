@@ -4,143 +4,16 @@
 \section{Architettura e Metodologia}
 
 % ---------------------------------------------------------
-% SUBSECTION: SUBTASK B (Multi-Class & Cascade)
+% 3.1 SUBTASK A (Binary Classification)
 % ---------------------------------------------------------
-\subsection{Subtask B: Multi-Class Detection}
-
-% SLIDE 1: STRATEGIA GENERALE (CASCATA)
-\begin{frame}{Subtask B: Cascade Inference Strategy}
-    Per gestire il forte sbilanciamento della classe \textit{Human} e la complessità del task multiclasse (11 classi), è stata adottata una strategia a due stadi:
-    
-    \vspace{0.4cm}
-    
-    \begin{block}{Pipeline Logica}
-        \begin{itemize}
-            \item \textbf{Stage 1: Binary Classifier}
-            \begin{itemize}
-                \item \textit{Obiettivo:} Filtrare accuratamente \textit{Human} vs \textit{AI Generated}.
-                \item \textit{Vantaggio:} Protegge dai falsi positivi sulla classe maggioritaria (Human).
-            \end{itemize}
-            
-            \item \textbf{Stage 2: Family Classifier}
-            \begin{itemize}
-                \item \textit{Attivazione:} Solo se lo Stage 1 predice "AI".
-                \item \textit{Obiettivo:} Identificazione Fine-Grained della famiglia (es. GPT, Llama, Mistral).
-            \end{itemize}
-        \end{itemize}
-    \end{block}
-\end{frame}
-
-% SLIDE 2: ARCHITETTURA DEL MODELLO
-\begin{frame}{Architettura Custom: Hybrid Code Classifier}
-    Il cuore del sistema è un modello ibrido basato su \textbf{UniXcoder-base}, esteso per catturare sia la semantica che la sintassi stilistica.
-    
-    \vspace{0.3cm}
-    \textbf{Componenti Architetturali:}
-    \begin{enumerate}
-        \item \textbf{Semantic Encoder (UniXcoder):} 
-        Utilizza un meccanismo di \textit{Attention Pooling} (somma pesata dei token) per ottenere una rappresentazione del contesto globale, superiore al semplice token [CLS].
-        
-        \item \textbf{Stylistic Projector:} 
-        Una rete feed-forward che proietta 8 feature statistiche manuali in uno spazio latente compatibile con l'encoder.
-        
-        \item \textbf{Feature Fusion:} 
-        Concatenazione degli embedding (Semantico + Stilistico) prima del livello di classificazione finale.
-    \end{enumerate}
-\end{frame}
-
-% SLIDE 3: DETTAGLIO FEATURE STILISTICHE
-\begin{frame}{Subtask B: Feature Engineering}
-    Poiché i LLM lasciano "impronte" stilistiche (es. verbosità, convenzioni di naming), il modello analizza le seguenti metriche estratte staticamente:
-    
-    \vspace{0.3cm}
-    
-    \begin{columns}
-        \begin{column}{0.5\textwidth}
-            \textbf{Stile e Formattazione:}
-            \begin{itemize}
-                \item Densità dei commenti.
-                \item Rapporto Snake\_case vs CamelCase.
-                \item Indentazione (media e massima).
-                \item Lunghezza media delle righe.
-            \end{itemize}
-        \end{column}
-        \begin{column}{0.5\textwidth}
-            \textbf{Sintassi e Struttura:}
-            \begin{itemize}
-                \item Token logici (\texttt{if}, \texttt{for}, \texttt{while}).
-                \item Rapporto spazi bianchi/codice.
-                \item Densità caratteri speciali.
-                \item Empty lines ratio.
-            \end{itemize}
-        \end{column}
-    \end{columns}
-    
-    \vspace{0.4cm}
-    \textit{\footnotesize Nota: Queste feature permettono di distinguere modelli sinteticamente perfetti ma stilisticamente diversi (es. GPT-4 tende a commentare molto più di Llama-2).}
-\end{frame}
+\input{section/subsection_3/subsection_1.tex}
 
 % ---------------------------------------------------------
-% SUBSECTION: SUBTASK C (Hybrid & Adversarial)
+% 3.2 SUBTASK B (Multi-Class & Cascade)
 % ---------------------------------------------------------
-\subsection{Subtask C: Hybrid \& Adversarial}
+\input{section/subsection_3/subsection_2.tex}
 
-% SLIDE 4: IL PROBLEMA DELLE 4 CLASSI
-\begin{frame}{Subtask C: La sfida delle "Zone Grigie"}
-    Il Subtask C richiede di distinguere tra 4 classi con confini decisionali sfumati:
-    
-    \vspace{0.3cm}
-    \begin{description}
-        \item[Human (0)] Codice originale scritto da sviluppatori.
-        \item[AI-Generated (1)] Codice generato interamente da LLM.
-        \item[Hybrid (2)] \textbf{Collaborazione Uomo-Macchina.} Codice molto simile alla classe Human, difficile da isolare semanticamente.
-        \item[Adversarial (3)] \textbf{AI Offuscata.} Codice manipolato intenzionalmente per evadere i rilevatori.
-    \end{description}
-    
-    \vspace{0.2cm}
-    \textbf{Necessità:} Un'analisi che vada oltre il contenuto semantico, rilevando anomalie strutturali.
-\end{frame}
-
-% SLIDE 5: FEATURE EXTRACTION SUBTASK C
-\begin{frame}{Subtask C: Advanced Feature Extraction}
-    Per identificare l'offuscamento (\textit{Adversarial}) e le modifiche umane (\textit{Hybrid}), è stato implementato un modulo parallelo di estrazione feature:
-
-    \vspace{0.3cm}
-    \begin{columns}
-        \begin{column}{0.48\textwidth}
-            \begin{block}{Metriche di Entropia}
-                \begin{itemize}
-                    \item \textbf{Shannon Entropy:} Picchi di entropia indicano nomi di variabili casuali (tipico dell'offuscamento).
-                    \item \textbf{Long Strings:} Rilevamento di payload nascosti.
-                \end{itemize}
-            \end{block}
-        \end{column}
-        \begin{column}{0.48\textwidth}
-            \begin{block}{Metriche Strutturali}
-                \begin{itemize}
-                    \item \textbf{Nesting Depth:} Gli umani tendono a nidificare di più il codice rispetto alle AI.
-                    \item \textbf{Keyword Density:} Distribuzione delle parole chiave del linguaggio.
-                \end{itemize}
-            \end{block}
-        \end{column}
-    \end{columns}
-\end{frame}
-
-% SLIDE 6: TRAINING STRATEGIES
-\begin{frame}{Strategie di Training e Ottimizzazione}
-    Per entrambi i Subtask, il processo di training è stato ottimizzato per gestire lo sbilanciamento e migliorare la separazione delle classi:
-    
-    \vspace{0.3cm}
-    
-    \begin{itemize}
-        \item \textbf{Loss Function Adattiva:} Utilizzo della \textbf{Focal Loss} ($\gamma=2.0$) per penalizzare gli errori sulle classi difficili (Hybrid) rispetto a quelle facili.
-        
-        \item \textbf{Supervised Contrastive Learning (SupCon):} 
-        Applicata per compattare i cluster delle stesse classi nello spazio latente e distanziare classi simili (es. Human vs Hybrid).
-        
-        \item \textbf{Robustezza ai Dati (Data Augmentation):}
-        Implementazione del \textbf{Random Crop} per input lunghi ($L > 512$):
-        \[ \text{Input} = \text{Code}[idx : idx + L_{max}] \]
-        Questo costringe il modello ad apprendere dalla logica interna e non solo dagli header/commenti iniziali.
-    \end{itemize}
-\end{frame}
+% ---------------------------------------------------------
+% 3.3 SUBTASK C (Hybrid & Adversarial)
+% ---------------------------------------------------------
+\input{section/subsection_3/subsection_3.tex}

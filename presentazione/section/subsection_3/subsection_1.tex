@@ -1,0 +1,129 @@
+\subsection*{Subtask A: Neuro-Symbolic Core}
+
+% SLIDE A.1: RAZIONALE (Il Perché)
+\begin{frame}{Subtask A: Razionale Neuro-Simbolico}
+    \vspace{-0.2cm}
+    \textbf{La Sfida:} Mitigare il \textit{Generalization Gap} nel Cross-Language Detection.
+    \\ \footnotesize \textit{Training: Python/Java $\to$ Test: Go/PHP (Unseen Architectures).}
+    \vspace{0.3cm}
+
+    \begin{columns}[t, onlytextwidth]
+        % STREAM SEMANTICO
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faBrain\ Semantic Stream, 
+                colframe=Obsidian, colback=white, coltitle=white, 
+                boxed title style={colback=VividViolet}, 
+                fonttitle=\bfseries, drop shadow, arc=3pt]
+                
+                \textbf{Backbone:} Microsoft UniXcoder
+                \vspace{0.1cm}
+                \begin{itemize}
+                    \setlength\itemsep{0.3em}
+                    \item[\faCheck] \footnotesize \textbf{Data Flow Aware:} Cattura la dipendenza semantica tra variabili.
+                    \item[\faFilter] \footnotesize \textbf{Attention Pooling:} Aggregazione pesata degli hidden states (non semplice [CLS]).
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}
+
+        % STREAM AGNOSTICO
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faRulerCombined\ Agnostic Stream, 
+                colframe=Obsidian, colback=white, coltitle=white, 
+                boxed title style={colback=CyanGlow!80!blue}, 
+                fonttitle=\bfseries, drop shadow, arc=3pt]
+                
+                \textbf{Input:} 11 Handcrafted Features
+                \vspace{0.1cm}
+                \begin{itemize}
+                    \setlength\itemsep{0.3em}
+                    \item[\faCheck] \footnotesize \textbf{Psycholinguistics:} Entropia nomi variabili e consistenza di stile.
+                    \item[\faCogs] \footnotesize \textbf{Norm:} Log-transformation per feature unbounded (es. Perplexity).
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+    
+    \vspace{0.3cm}
+    \centering
+    \begin{tcolorbox}[colback=gray!10, colframe=gray!40, width=0.98\textwidth, arc=2mm, boxrule=0.5pt, left=2mm]
+        \centering \small 
+        \faLink\ \textbf{Gated Fusion Strategy:} Concatenazione dinamica proiettata su spazio latente condiviso con attivazione \textbf{Mish}.
+    \end{tcolorbox}
+\end{frame}
+
+% SLIDE A.2: BLUEPRINT (Il Come - Visivo)
+\begin{frame}{Subtask A: Blueprint Architetturale}
+    \centering
+    \begin{tikzpicture}[scale=0.58, transform shape,
+        node distance=1.1cm,
+        layer/.style={rectangle, rounded corners=3pt, draw=Obsidian, fill=white, minimum width=3.0cm, minimum height=1cm, align=center, drop shadow={opacity=0.3}},
+        tensor/.style={rectangle, draw=gray!60, fill=gray!5, dashed, minimum width=2.2cm, minimum height=0.6cm, font=\scriptsize\ttfamily},
+        arrow/.style={->, >=stealth, thick, darkgray}
+    ]
+        % --- LEFT STREAM (Code) ---
+        \node (input_code) [font=\large] {\faCode \ \textbf{Source Code}};
+        \node[layer, fill=VividViolet!10, below=0.5cm of input_code] (backbone) {\textbf{UniXcoder Base}\\ \tiny Transformers};
+        \node[layer, below=0.5cm of backbone] (pooler) {\textbf{Attention Pooler}\\ \tiny $h_i \cdot \text{softmax}(W h_i)$};
+        \node[tensor, below=0.3cm of pooler] (emb_text) {Text Emb $[768]$};
+
+        % --- RIGHT STREAM (Features) ---
+        \node[right=5cm of input_code, font=\large] (input_feat) {\faListOl \ \textbf{11 Features}};
+        \node[layer, fill=CyanGlow!10, below=0.5cm of input_feat] (gate_net) {\textbf{Feature Projector}\\ \tiny Linear $\to$ BN $\to$ \textbf{Mish}};
+        \node[tensor, below=2.3cm of gate_net] (emb_style) {Style Emb $[128]$};
+
+        % --- FUSION ---
+        \coordinate (midpoint) at ($(emb_text)!0.5!(emb_style)$);
+        \node[layer, fill=Obsidian, text=white, below=1.5cm of midpoint] (concat) {\faProjectDiagram \ \textbf{Concatenation}};
+        \node[layer, below=0.5cm of concat] (head) {\textbf{Classifier Head}\\ \tiny LayerNorm $\to$ Dropout $\to$ Linear};
+        \node[below=0.4cm of head, font=\bfseries] (output) {Output Logits};
+
+        % --- CONNECTIONS ---
+        \draw[arrow] (input_code) -- (backbone); \draw[arrow] (backbone) -- (pooler); \draw[arrow] (pooler) -- (emb_text); \draw[arrow] (emb_text) -- (concat);
+        \draw[arrow] (input_feat) -- (gate_net); \draw[arrow] (gate_net) -- (emb_style); \draw[arrow] (emb_style) |- (concat);
+        \draw[arrow] (concat) -- (head); \draw[arrow] (head) -- (output);
+        
+        % Annotazione tecnica
+        \node[right=0.5cm of head, font=\tiny, text=gray, align=left] {Init: Xavier/Kaiming\\Opt: AdamW + AMP};
+    \end{tikzpicture}
+\end{frame}
+
+% SLIDE A.3: DETTAGLIO (Il Cosa - Features & Optimization)
+\begin{frame}{Subtask A: Feature Engineering \& Optimization}
+    \small
+    Combinazione di metriche neurali avanzate ed euristiche psicologiche umane.
+    \vspace{0.2cm}
+
+    \begin{columns}[T]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=\faMicrochip \ Neural \& Lexical, fonttitle=\bfseries\small, drop shadow]
+                \begin{itemize}
+                    \setlength\itemsep{0.5em}
+                    \item \textbf{LLM Perplexity (Qwen-2.5):} 
+                    \\ \scriptsize Misura la "sorpresa" statistica usando un modello SOTA (1.5B params).
+                    \item \textbf{Human Markers:} 
+                    \\ \scriptsize Rilevamento euristico di pattern emotivi/lavorativi umani: \texttt{TODO}, \texttt{FIXME}, \texttt{HACK}.
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}
+
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=\faCodeBranch \ Syntactic \& Structural, fonttitle=\bfseries\small, drop shadow]
+                \begin{itemize}
+                    \setlength\itemsep{0.5em}
+                    \item \textbf{Lazy Spacing Ratio:} 
+                    \\ \scriptsize L'AI è rigida (\texttt{a = b}), l'umano è spesso incostante (\texttt{a=b}).
+                    \item \textbf{Naming Consistency:} 
+                    \\ \scriptsize Mix di \texttt{camelCase} e \texttt{snake\_case} (Tipico di refactoring umano imperfetto).
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+
+    \vspace{0.3cm}
+    \textbf{Pipeline Optimization:}
+    \footnotesize
+    \begin{itemize}
+        \item[\faCrop] \textbf{Random Cropping:} Training su porzioni casuali ($L=512$) per forzare la lettura del corpo funzioni e non solo degli header.
+        \item[\faBolt] \textbf{Efficiency:} Mixed Precision (FP16) e Gradient Accumulation per massimizzare il batch size.
+    \end{itemize}
+\end{frame}

@@ -1,0 +1,98 @@
+\subsection*{Subtask A: Performance Analysis}
+
+\begin{frame}{Subtask A: Training Dynamics \& F1 Score}
+    \small
+    \textbf{Analisi:} Sui dati di validazione (linguaggi noti), il modello raggiunge performance quasi perfette.
+    \vspace{0.1cm}
+
+    \begin{columns}[c]
+        \begin{column}{0.5\textwidth}
+            \begin{tcolorbox}[colback=white, colframe=gray!20, boxrule=0.5pt, sharp corners]
+                \centering
+                \includegraphics[width=\textwidth, height=3.0cm, keepaspectratio]{img/results_subtask_a/Val_f1_macro VS step.jpeg}
+            \end{tcolorbox}
+            \centering \tiny \textit{Validation F1-Macro (Peak: \textbf{0.993})}
+        \end{column}
+
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, title=Convergenza Ottimale, colframe=VividViolet, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                \begin{itemize}
+                    \item \textbf{High Fidelity:} Apprende rapidamente i pattern sintattici di Python/Java.
+                    \item \textbf{Stability:} Validation loss coerente.
+                \end{itemize}
+                
+                \tcblower
+                
+                \textbf{Risultato:}
+                \\ Il task Human vs AI su linguaggi visti è \textbf{risolto} (F1 $> 0.99$).
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+\begin{frame}{Subtask A: Precisione Estrema (Validation)}
+    \small
+    La matrice conferma che il modello ha "decodificato" perfettamente lo stile dei linguaggi di training.
+    \vspace{0.1cm}
+
+    \begin{columns}[c]
+        \begin{column}{0.45\textwidth}
+            \centering
+            \begin{tcolorbox}[colback=white, colframe=gray!20, boxrule=1pt, sharp corners]
+                \centering
+                \includegraphics[width=\textwidth, height=3.6cm, keepaspectratio]{img/results_subtask_a/confusion_matrix.png}
+            \end{tcolorbox}
+        \end{column}
+
+        \begin{column}{0.53\textwidth}
+            \begin{tcolorbox}[enhanced, title=\faCheckDouble\ Near-Zero Errors, colframe=Obsidian, colback=white, fonttitle=\bfseries\footnotesize, drop shadow]
+                \footnotesize
+                Su oltre 30.000 campioni:
+                \begin{itemize}
+                    \item \textbf{False Positives:} Solo $\approx 130$.
+                    \item \textbf{False Negatives:} Solo $\approx 80$.
+                \end{itemize}
+                
+                \tcblower
+                
+                \faInfoCircle\ \textbf{Interpretazione:}
+                \\ Il modello identifica "impronte digitali" forti (es. indentazione) che separano Umano da AI.
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+\end{frame}
+
+\begin{frame}{Subtask A: The Generalization Gap (Test Set)}
+    \small
+    \textbf{Il Paradosso:} Training perfetto vs crollo delle performance sui dati di Test ciechi (Kaggle).
+    \vspace{0.2cm}
+
+    \begin{columns}[t]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=VividViolet!10, colframe=VividViolet, title=Validation (Python/Java), fonttitle=\bfseries\footnotesize, halign=center]
+                \Large \textbf{0.993}
+                \\ \footnotesize F1-Macro
+                \\ \scriptsize \faCheck\ \textit{Seen Syntax}
+            \end{tcolorbox}
+        \end{column}
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=red!10, colframe=red!60!black, title=Test (Go/PHP/...), fonttitle=\bfseries\footnotesize, halign=center]
+                \Large \textbf{$\approx$ 0.45}
+                \\ \footnotesize F1-Macro
+                \\ \scriptsize \faExclamationTriangle\ \textit{Unseen Syntax}
+            \end{tcolorbox}
+        \end{column}
+    \end{columns}
+
+    \vspace{0.2cm}
+    
+    \begin{tcolorbox}[colback=gray!5, colframe=Obsidian, title=\faSearch\ Root Cause: Overfitting Sintattico, fonttitle=\bfseries\footnotesize]
+        \footnotesize
+        Il modello non ha appreso la semantica universale, ma ha memorizzato le keyword.
+        \begin{itemize}
+            \item \textbf{Learned:} \textit{"\texttt{def} + indentazione = Python AI"}.
+            \item \textbf{Failed:} Nuovi costrutti (es. \texttt{func} in Go, \texttt{\$} in PHP) causano il fallimento del transfer learning.
+        \end{itemize}
+    \end{tcolorbox}
+\end{frame}

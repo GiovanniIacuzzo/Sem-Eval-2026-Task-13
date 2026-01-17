@@ -1,0 +1,122 @@
+\subsection*{Subtask B: Multi-Class Detection}
+
+% SLIDE B.1: STRATEGIA CASCATA
+\begin{frame}{Subtask B: Inferenza Gerarchica (Cascade)}
+    \textbf{La Sfida:} Distinguere 11 famiglie di LLM (es. Llama vs Mistral) con forte sbilanciamento classi.
+    \vspace{0.3cm}
+    
+    \centering
+    \begin{tikzpicture}[node distance=1.2cm, auto, scale=0.8, transform shape,
+        stage/.style={rectangle, draw=Obsidian, thick, rounded corners=3pt, minimum width=2.4cm, minimum height=1.0cm, align=center, fill=white, drop shadow={opacity=0.3}},
+        decision/.style={diamond, draw=VividViolet, thick, fill=VividViolet!10, text centered, inner sep=1pt, font=\scriptsize, drop shadow={opacity=0.3}},
+        line/.style={draw, thick, ->, >=stealth, darkgray}
+    ]
+        % Nodes
+        \node (input) {\textbf{Input}};
+        \node [stage, right=0.5cm of input] (stage1) {\textbf{STAGE 1}\\ Binary Filter};
+        \node [decision, right=0.5cm of stage1] (dec) {Is AI?};
+        \node [stage, right=0.8cm of dec, fill=CyanGlow!10] (stage2) {\textbf{STAGE 2}\\ Metric Learning};
+        \node [below=0.5cm of dec, font=\bfseries\small, text=gray] (human) {HUMAN};
+        \node [below=0.5cm of stage2, font=\bfseries\small] (family) {GPT/Llama...};
+
+        % Paths
+        \path [line] (input) -- (stage1);
+        \path [line] (stage1) -- (dec);
+        \path [line] (dec) -- node [above, font=\tiny] {YES} (stage2);
+        \path [line] (dec) -- node [right, font=\tiny] {NO} (human);
+        \path [line] (stage2) -- (family);
+    \end{tikzpicture}
+
+    \vspace{0.3cm}
+    % NOTA: I % alla fine delle righe delle colonne sono FONDAMENTALI in Beamer
+    \begin{columns}[t, onlytextwidth]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=\faFilter\ Stage 1: Binary Filter, fonttitle=\bfseries\tiny, arc=2mm]
+                \tiny \textbf{Obiettivo:} Protezione dai False Positives.
+                \\ Filtra il codice umano prima della classificazione fine.
+            \end{tcolorbox}
+        \end{column}%
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=VividViolet, title=\faFingerprint\ Stage 2: Family ID, fonttitle=\bfseries\tiny, arc=2mm]
+                \tiny \textbf{Obiettivo:} Model Fingerprinting.
+                \\ Sfrutta SupCon Loss per distinguere sfumature sottili.
+            \end{tcolorbox}
+        \end{column}%
+    \end{columns}
+\end{frame}
+
+% SLIDE B.2: ARCHITETTURA & LOSS
+\begin{frame}{Subtask B: Supervised Contrastive Learning}
+    \small
+    Per distinguere famiglie simili, il modello proietta le feature in uno spazio ipersferico.
+    \vspace{0.1cm}
+
+    \centering
+    \begin{tikzpicture}[scale=0.6, transform shape,
+        layer/.style={rectangle, draw=Obsidian, fill=white, rounded corners=2pt, minimum width=2.5cm, minimum height=0.8cm, drop shadow},
+        arrow/.style={->, >=stealth, thick, darkgray}
+    ]
+        % Backbone
+        \node[layer, fill=VividViolet!10] (backbone) {\textbf{UniXcoder}};
+        \node[layer, below=0.5cm of backbone] (pooler) {\textbf{Attn Pooler}};
+        
+        % Heads Branching (Semplificato per evitare errori di positioning)
+        \node[layer, below left=0.8cm and 0.1cm of pooler, fill=CyanGlow!10] (supcon) {\textbf{SupCon Head}};
+        \node[layer, below right=0.8cm and 0.1cm of pooler] (class) {\textbf{Class Head}};
+
+        % Losses
+        \node[below=0.2cm of supcon, align=center, font=\scriptsize] (loss1) {\textbf{SupCon Loss}};
+        \node[below=0.2cm of class, align=center, font=\scriptsize] (loss2) {\textbf{Focal Loss}};
+
+        % Connections
+        \draw[arrow] (backbone) -- (pooler);
+        \draw[arrow] (pooler) -- (supcon);
+        \draw[arrow] (pooler) -- (class);
+        \draw[arrow, dashed] (supcon) -- (loss1);
+        \draw[arrow, dashed] (class) -- (loss2);
+    \end{tikzpicture}
+
+    \vspace{0.2cm}
+    
+    % Box senza centering esterno e senza itemize complesso
+    \begin{tcolorbox}[colback=gray!5, colframe=gray!30, left=1mm, boxrule=0pt, arc=2mm]
+        \footnotesize
+        \textbf{Loss Function Ibrida:} $\mathcal{L}_{total} = \mathcal{L}_{Focal} + 0.5 \cdot \mathcal{L}_{SupCon}$
+        \vspace{0.1cm}
+        \begin{itemize}
+            \item \textbf{SupCon:} Avvicina gli embedding della stessa famiglia.
+            \item \textbf{Focal Loss:} Penalizza errori su classi rare.
+        \end{itemize}
+    \end{tcolorbox}
+\end{frame}
+
+% SLIDE B.3: FEATURE STILISTICHE
+\begin{frame}{Subtask B: Profiling Stilistico}
+    Analisi di 8 feature strutturali estratte in tempo reale (\textit{On-the-fly}).
+    \vspace{0.2cm}
+    
+    \begin{columns}[T, onlytextwidth]
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=VividViolet, title=\faCode\ Syntactic Markers, fonttitle=\bfseries\small, drop shadow]
+                \begin{itemize}
+                    \setlength\itemsep{0.5em}
+                    \item \textbf{Logic Token Density:} 
+                    \\ \scriptsize Frequenza keyword (if, for). L'AI genera logica densa.
+                    \item \textbf{Max Indentation:} 
+                    \\ \scriptsize L'AI evita nesting eccessivi.
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}%
+        \begin{column}{0.48\textwidth}
+            \begin{tcolorbox}[enhanced, colback=white, colframe=Obsidian, title=\faAlignLeft\ Lexical Markers, fonttitle=\bfseries\small, drop shadow]
+                \begin{itemize}
+                    \setlength\itemsep{0.5em}
+                    \item \textbf{Comment Ratio:} 
+                    \\ \scriptsize Verbose (GPT-4) vs Concise (Llama).
+                    \item \textbf{Case Style:} 
+                    \\ \scriptsize Coerenza snake\_case vs CamelCase.
+                \end{itemize}
+            \end{tcolorbox}
+        \end{column}%
+    \end{columns}
+\end{frame}
